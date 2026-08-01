@@ -48,6 +48,12 @@ Every stage after WF-01 is invoked exclusively via n8n's `Execute Workflow Trigg
 - **Rule-based routing** — assigns the responsible team, priority, notification policy, escalation level, and SLA deadline per alarm type and incident context.
 - **Telegram delivery** — formats and sends the final notification via the Telegram Bot API, with retry and a structured failure record on delivery failure.
 
+## System Architecture
+
+![AI Fiber Alarm Automation Architecture](screenshots/Architecture%20diagram.png)
+
+The diagram below illustrates the complete end-to-end AI Fiber Alarm Automation workflow, including vendor alarm ingestion, AI-based classification, metadata enrichment, business rule processing, and Telegram notification delivery.
+
 ## Known current limitations
 
 - WF-01's public webhook currently has **no authentication configured**.
