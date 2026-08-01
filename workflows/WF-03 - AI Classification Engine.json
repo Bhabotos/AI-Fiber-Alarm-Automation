@@ -1,0 +1,713 @@
+{
+  "name": "WF-03 - AI Classification Engine",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## WF-03: AI Classification Engine\n\nStandalone, reusable sub-workflow. Called by WF-02 (Alarm Normalizer) via an 'Execute Workflow' node, passing the standardized alarm JSON.\n\nFlow:\nExecute Workflow Trigger -> Validate Input -> Build Claude Prompt -> Call Claude API -> Parse & Validate AI Output -> Apply Business Rules -> Compute Confidence Routing -> [Auto-Approved | Manual Review | Human Validation Required]\n\nInvalid input, failed AI calls, and malformed AI responses each route to their own Error Output.\n\nNo Google Sheets, no Telegram, no Slack, no Email, no ticketing, no dashboard - AI classification only.",
+        "height": 280,
+        "width": 380
+      },
+      "id": "81926fc3-2389-4096-a229-bceee9f808a8",
+      "name": "Sticky Note - Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "id": "987e2338-b3b4-42c5-a0a3-b7ef1919f1fd",
+      "name": "1. Execute Workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        32,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 2. Validate Input\n// Confirms the standardized alarm from WF-02 has everything the AI prompt needs.\n\nconst REQUIRED = ['correlationId', 'vendor', 'alarmType', 'severity', 'nodeName', 'siteId', 'region', 'timestamp'];\n\nconst item = $input.first().json;\nconst missing = REQUIRED.filter((f) => item[f] === undefined || item[f] === null || item[f] === '');\n\nreturn [{\n  json: {\n    isValid: missing.length === 0,\n    missingFields: missing,\n    ...item\n  }\n}];"
+      },
+      "id": "556f2f62-6fc6-4ace-a3de-e0a64156a94c",
+      "name": "2. Validate Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond-input-valid",
+              "leftValue": "={{$json.isValid}}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "5f8295f2-53e9-4575-8110-219f21e96369",
+      "name": "Is Input Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        464,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "ei1",
+              "name": "status",
+              "type": "string",
+              "value": "invalid_input"
+            },
+            {
+              "id": "ei2",
+              "name": "correlationId",
+              "type": "string",
+              "value": "={{$json.correlationId}}"
+            },
+            {
+              "id": "ei3",
+              "name": "missingFields",
+              "type": "array",
+              "value": "={{$json.missingFields}}"
+            },
+            {
+              "id": "ei4",
+              "name": "receivedAt",
+              "type": "string",
+              "value": "={{$now.toISO()}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "f7125706-2b70-4eff-aa53-b58337ffac04",
+      "name": "Error Output - Invalid Input",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        688,
+        608
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 3. Build Claude Prompt\n// Assembles the system prompt (role + rules + output contract) and the\n// user prompt (the actual alarm data) that will be sent to Claude.\n\nconst item = $input.first().json;\n\nconst alarm = {\n  correlationId: item.correlationId,\n  vendor: item.vendor,\n  alarmType: item.alarmType,\n  alarmDescription: item.description || item.alarmName || item.alarmType,\n  severity: item.severity,\n  nodeName: item.nodeName,\n  siteId: item.siteId,\n  region: item.region,\n  timestamp: item.timestamp\n};\n\nconst systemPrompt = `You are a Senior Telecom NOC (Network Operations Center) Analyst AI for a fiber network operator.\n\nYour job: analyze ONE normalized fiber network alarm and produce an operational assessment for the NOC and field teams.\n\nYou MUST follow these business rules when they apply (do not contradict them):\n- alarmType FIBER_CUT -> priority Critical, team Transmission, fieldEngineer true\n- alarmType LOS -> priority Major, team NOC\n- alarmType HIGH_BER -> priority Minor, team \"Transmission Monitoring\"\n- alarmType POWER_FAILURE -> priority Critical, team Power\n- alarmType MUX_FAILURE -> priority Critical, team Transmission\nFor any other alarmType, use your own professional judgment based on telecom fiber network operations best practice.\n\nOutput contract (STRICT):\n- Return ONLY a single valid JSON object. No markdown, no code fences, no commentary, no explanation before or after.\n- The JSON object MUST contain exactly these fields:\n  {\n    \"alarmCategory\": string,\n    \"rootCause\": string,\n    \"impact\": string,\n    \"priority\": \"Critical\" | \"Major\" | \"Minor\" | \"Warning\",\n    \"recommendedAction\": string,\n    \"estimatedResolution\": string,\n    \"confidence\": number between 0 and 1,\n    \"fieldEngineer\": boolean,\n    \"customerImpact\": \"High\" | \"Medium\" | \"Low\",\n    \"team\": string,\n    \"prevention\": string\n  }\n- \"confidence\" reflects how certain you are of this specific assessment given the information available, not a fixed number.\n- Keep each string field concise: 1-3 sentences, operational and specific, no generic filler.`;\n\nconst userPrompt = `Analyze this normalized fiber network alarm and return the JSON object described in your instructions.\n\nAlarm JSON:\n${JSON.stringify(alarm, null, 2)}\n\nRemember: respond with ONLY the JSON object, nothing else.`;\n\nreturn [{\n  json: {\n    ...item,\n    systemPrompt,\n    userPrompt\n  }\n}];"
+      },
+      "id": "fcae76a3-fb3b-4b9d-ab74-90fff13c54c4",
+      "name": "3. Build Claude Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        688,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"model\": \"claude-sonnet-5\", \"max_tokens\": 1024, \"temperature\": 0, \"system\": $json.systemPrompt, \"messages\": [ { \"role\": \"user\", \"content\": $json.userPrompt } ] } }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "id": "48a6006a-a2d2-402e-b943-efdfd043087d",
+      "name": "4. Call Claude API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        912,
+        240
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "awHVgQN3M5jARkF4",
+          "name": "Header Auth account"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "ea1",
+              "name": "status",
+              "type": "string",
+              "value": "ai_call_failed"
+            },
+            {
+              "id": "ea2",
+              "name": "correlationId",
+              "type": "string",
+              "value": "={{ $('3. Build Claude Prompt').first().json.correlationId }}"
+            },
+            {
+              "id": "ea3",
+              "name": "errorMessage",
+              "type": "string",
+              "value": "={{$json.error ? $json.error.toString() : 'Unknown error calling Claude API'}}"
+            },
+            {
+              "id": "ea4",
+              "name": "receivedAt",
+              "type": "string",
+              "value": "={{$now.toISO()}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "7f09f87c-7312-4a5b-84f2-17a01eff694f",
+      "name": "Error Output - AI Call Failed",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1120,
+        64
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 5. Parse & Validate AI Output\n// Extracts Claude's text response, strips any markdown fencing, parses it as\n// JSON, and checks it matches the required schema before trusting it.\n//\n// Anthropic's Messages API can return a top-level API error instead of a\n// normal message (e.g. { type: 'error', error: { type, message } } for\n// billing/rate-limit/auth problems) even when the HTTP node's neverError\n// option keeps this from throwing. That error object has no 'content'\n// array, so treating it as a normal response silently produced a\n// misleading 'Unexpected end of JSON input' parseError. This is checked\n// for explicitly now so the real Anthropic error message (e.g. 'Your\n// credit balance is too low...') surfaces directly instead.\n\nconst original = $('3. Build Claude Prompt').first().json;\nconst response = $input.first().json;\n\nif (response && response.type === 'error') {\n  const apiErrorMessage = (response.error && response.error.message) || 'Unknown Anthropic API error';\n  return [{\n    json: {\n      correlationId: original.correlationId,\n      vendor: original.vendor,\n      alarmType: original.alarmType,\n      originalSeverity: original.severity,\n      nodeName: original.nodeName,\n      siteId: original.siteId,\n      region: original.region,\n      timestamp: original.timestamp,\n      isValid: false,\n      parseError: 'Anthropic API error: ' + apiErrorMessage,\n      schemaErrors: [],\n      rawAiText: '',\n      aiOutput: null\n    }\n  }];\n}\n\nlet rawText = '';\ntry {\n  const blocks = response.content || [];\n  const textBlock = blocks.find((b) => b.type === 'text');\n  rawText = textBlock ? textBlock.text : '';\n} catch (e) {\n  rawText = '';\n}\n\nlet cleaned = (rawText || '').trim();\ncleaned = cleaned.replace(/^```json\\s*/i, '').replace(/^```\\s*/, '').replace(/```\\s*$/, '').trim();\n\nlet parsed = null;\nlet parseError = null;\ntry {\n  parsed = JSON.parse(cleaned);\n} catch (e) {\n  parseError = e.message;\n}\n\nconst REQUIRED_AI_FIELDS = ['alarmCategory', 'rootCause', 'impact', 'priority', 'recommendedAction', 'estimatedResolution', 'confidence', 'fieldEngineer', 'customerImpact', 'team', 'prevention'];\nconst schemaErrors = [];\n\nif (parsed) {\n  for (const f of REQUIRED_AI_FIELDS) {\n    if (parsed[f] === undefined || parsed[f] === null) schemaErrors.push(`Missing field: ${f}`);\n  }\n  if (parsed.confidence !== undefined && (typeof parsed.confidence !== 'number' || parsed.confidence < 0 || parsed.confidence > 1)) {\n    schemaErrors.push('confidence must be a number between 0 and 1');\n  }\n  if (parsed.fieldEngineer !== undefined && typeof parsed.fieldEngineer !== 'boolean') {\n    schemaErrors.push('fieldEngineer must be a boolean');\n  }\n}\n\nconst isValid = !!parsed && parseError === null && schemaErrors.length === 0;\n\nreturn [{\n  json: {\n    correlationId: original.correlationId,\n    vendor: original.vendor,\n    alarmType: original.alarmType,\n    originalSeverity: original.severity,\n    nodeName: original.nodeName,\n    siteId: original.siteId,\n    region: original.region,\n    timestamp: original.timestamp,\n    isValid,\n    parseError,\n    schemaErrors,\n    rawAiText: rawText,\n    aiOutput: parsed\n  }\n}];"
+      },
+      "id": "7308ed52-f0cc-4197-bbbf-45a108e29333",
+      "name": "5. Parse & Validate AI Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond-ai-valid",
+              "leftValue": "={{$json.isValid}}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "0b5b28a8-38db-43b1-a62f-cc2f7fac2833",
+      "name": "Is AI Output Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1344,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "eo1",
+              "name": "status",
+              "type": "string",
+              "value": "ai_output_invalid"
+            },
+            {
+              "id": "eo2",
+              "name": "correlationId",
+              "type": "string",
+              "value": "={{$json.correlationId}}"
+            },
+            {
+              "id": "eo3",
+              "name": "parseError",
+              "type": "string",
+              "value": "={{$json.parseError}}"
+            },
+            {
+              "id": "eo4",
+              "name": "schemaErrors",
+              "type": "array",
+              "value": "={{$json.schemaErrors}}"
+            },
+            {
+              "id": "eo5",
+              "name": "rawAiText",
+              "type": "string",
+              "value": "={{$json.rawAiText}}"
+            },
+            {
+              "id": "eo6",
+              "name": "receivedAt",
+              "type": "string",
+              "value": "={{$now.toISO()}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "826037a9-2013-4b78-b38d-52d6838a4664",
+      "name": "Error Output - Invalid AI Response",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1344,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 6. Apply Business Rules\n// Deterministic safety net: for the 5 alarm types with defined business\n// rules, priority/team (and fieldEngineer for Fiber Cut) are ENFORCED\n// regardless of what the AI proposed. All other AI fields are kept as-is.\n// For alarm types with no defined rule, the AI's judgment is used untouched.\n\nconst item = $input.first().json;\nconst ai = item.aiOutput;\n\nconst BUSINESS_RULES = {\n  FIBER_CUT: { priority: 'Critical', team: 'Transmission', fieldEngineer: true },\n  LOS: { priority: 'Major', team: 'NOC', fieldEngineer: null },\n  HIGH_BER: { priority: 'Minor', team: 'Transmission Monitoring', fieldEngineer: null },\n  POWER_FAILURE: { priority: 'Critical', team: 'Power', fieldEngineer: null },\n  MUX_FAILURE: { priority: 'Critical', team: 'Transmission', fieldEngineer: null }\n};\n\nconst rule = BUSINESS_RULES[item.alarmType];\nconst finalOutput = { ...ai };\nlet businessRuleApplied = false;\n\nif (rule) {\n  businessRuleApplied = true;\n  finalOutput.priority = rule.priority;\n  finalOutput.team = rule.team;\n  if (rule.fieldEngineer !== null) {\n    finalOutput.fieldEngineer = rule.fieldEngineer;\n  }\n}\n\nreturn [{\n  json: {\n    correlationId: item.correlationId,\n    vendor: item.vendor,\n    alarmType: item.alarmType,\n    originalSeverity: item.originalSeverity,\n    nodeName: item.nodeName,\n    siteId: item.siteId,\n    region: item.region,\n    timestamp: item.timestamp,\n    businessRuleApplied,\n    ...finalOutput\n  }\n}];"
+      },
+      "id": "c46ecaa1-bafb-46fc-b2c6-483d5ceb8968",
+      "name": "6. Apply Business Rules",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1568,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 7. Compute Confidence Routing\n// Confidence > 0.90 -> auto-approved\n// Confidence 0.70-0.90 -> manual-review\n// Confidence < 0.70 -> human-validation-required\n\nconst item = $input.first().json;\nconst confidence = typeof item.confidence === 'number' ? item.confidence : 0;\n\nlet reviewStatus;\nif (confidence > 0.9) {\n  reviewStatus = 'auto-approved';\n} else if (confidence >= 0.7) {\n  reviewStatus = 'manual-review';\n} else {\n  reviewStatus = 'human-validation-required';\n}\n\nreturn [{\n  json: {\n    ...item,\n    reviewStatus,\n    aiModel: 'claude-sonnet-5',\n    processedAt: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "28ba90a0-166e-447c-ac17-a160d44ca4ce",
+      "name": "7. Compute Confidence Routing",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1792,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond-auto",
+              "leftValue": "={{$json.reviewStatus}}",
+              "rightValue": "auto-approved",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "75f0e516-7d05-48e5-a154-b6abb1b1f765",
+      "name": "Confidence > 90%?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2000,
+        240
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "aa0c7c2a-a17a-49ca-82d1-e214edbeb3e7",
+      "name": "8a. Auto-Approved",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        2224,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond-manual",
+              "leftValue": "={{$json.reviewStatus}}",
+              "rightValue": "manual-review",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "7ae8da5d-4688-4e59-814e-40d12e7ec3c8",
+      "name": "Confidence 70-90%?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2224,
+        384
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "8f14bd88-92d0-48c2-9443-48ca3db26e6b",
+      "name": "8b. Manual Review",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        2448,
+        240
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "76cb45c2-b2be-4a58-8c4b-866e60b3aeac",
+      "name": "8c. Human Validation Required",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        2448,
+        528
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### Error handling summary\n- Missing required input fields -> Error Output - Invalid Input\n- Claude API call fails/times out (after 3 retries, 2s apart, 30s timeout) -> Error Output - AI Call Failed\n- Claude responds but output isn't valid JSON or is missing required fields -> Error Output - Invalid AI Response (raw text preserved for debugging)\n\nEvery path returns a structured JSON object. Nothing is ever dropped silently.",
+        "height": 200,
+        "width": 320
+      },
+      "id": "28648c85-a104-490e-ace9-882c9a867ea3",
+      "name": "Sticky Note - Error Handling",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        912,
+        608
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### Confidence routing\n>90% -> Auto-Approved (proceed automatically downstream)\n70-90% -> Manual Review (flagged for a NOC engineer to confirm)\n<70% -> Human Validation Required (must be reviewed before any action is taken)\n\nAll 3 branches output the identical JSON shape - only 'reviewStatus' and which terminal node it reached differ.",
+        "height": 200,
+        "width": 320
+      },
+      "id": "7a817bcb-9b9f-4eca-a15b-e794de3dedf7",
+      "name": "Sticky Note - Confidence Routing",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        2000,
+        608
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "cachedResultName": "WF-04 - Site Metadata Enrichment",
+          "mode": "id",
+          "value": "E51WXHZ6qEUC1f56"
+        },
+        "workflowInputs": {
+          "mappingMode": "autoMapInputData",
+          "value": null
+        },
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "5483713b-d32e-438a-9254-3b504bc7c766",
+      "name": "9. Execute WF-04 Enrichment",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        2672,
+        304
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "1. Execute Workflow Trigger": {
+      "main": [
+        [
+          {
+            "node": "2. Validate Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "2. Validate Input": {
+      "main": [
+        [
+          {
+            "node": "Is Input Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Input Valid?": {
+      "main": [
+        [
+          {
+            "node": "3. Build Claude Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Error Output - Invalid Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "3. Build Claude Prompt": {
+      "main": [
+        [
+          {
+            "node": "4. Call Claude API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "4. Call Claude API": {
+      "main": [
+        [
+          {
+            "node": "5. Parse & Validate AI Output",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Error Output - AI Call Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "5. Parse & Validate AI Output": {
+      "main": [
+        [
+          {
+            "node": "Is AI Output Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is AI Output Valid?": {
+      "main": [
+        [
+          {
+            "node": "6. Apply Business Rules",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Error Output - Invalid AI Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "6. Apply Business Rules": {
+      "main": [
+        [
+          {
+            "node": "7. Compute Confidence Routing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "7. Compute Confidence Routing": {
+      "main": [
+        [
+          {
+            "node": "Confidence > 90%?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Confidence > 90%?": {
+      "main": [
+        [
+          {
+            "node": "8a. Auto-Approved",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Confidence 70-90%?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Confidence 70-90%?": {
+      "main": [
+        [
+          {
+            "node": "8b. Manual Review",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "8c. Human Validation Required",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "8a. Auto-Approved": {
+      "main": [
+        [
+          {
+            "node": "9. Execute WF-04 Enrichment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "8b. Manual Review": {
+      "main": [
+        [
+          {
+            "node": "9. Execute WF-04 Enrichment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "8c. Human Validation Required": {
+      "main": [
+        [
+          {
+            "node": "9. Execute WF-04 Enrichment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": true
+  },
+  "versionId": "a3dad68d-6ac0-4028-9b51-374d0a315536",
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp",
+    "instanceId": "05947142a4f38e4077604ad3dd31b1a8ac91444cd1d3240f77e7b6d160094eee"
+  },
+  "nodeGroups": [],
+  "id": "rl8C5Lsc7z4fbv5X",
+  "tags": []
+}

@@ -1,0 +1,419 @@
+{
+  "name": "WF-05 - Alarm Correlation & Deduplication Engine",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## WF-05: Alarm Correlation & Deduplication Engine\n\nStandalone, reusable sub-workflow. Called by WF-04 (Site Metadata Enrichment) via an 'Execute Workflow' node, passing its enriched alarm output.\n\nFlow:\nExecute Workflow Trigger -> Validate Input -> Correlation & Deduplication Engine -> [Duplicate Ignored | Merged - Child Alarm Added | New Master Incident Created]\n\nUses n8n's built-in workflow static data as the incident store (see README 'Performance Optimization' for production scaling notes).\n\nNo Telegram, no Slack, no Email, no dashboard, no ticketing - correlation and deduplication only.",
+        "height": 260,
+        "width": 380
+      },
+      "id": "f67ea623-f96b-4798-9f99-2e9df08c9140",
+      "name": "Sticky Note - Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "id": "bb78bffb-a54e-4f52-b605-51148569d349",
+      "name": "1. Execute Workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        32,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 2. Validate Input\n// Confirms the enriched alarm from WF-04 has everything the correlation\n// engine needs to group and deduplicate it correctly.\n\nconst REQUIRED = ['correlationId', 'siteId', 'nodeName', 'alarmType', 'timestamp', 'region', 'vendor'];\n\nconst item = $input.first().json;\nconst missing = REQUIRED.filter((f) => item[f] === undefined || item[f] === null || item[f] === '');\n\nreturn [{\n  json: {\n    isValid: missing.length === 0,\n    missingFields: missing,\n    ...item\n  }\n}];"
+      },
+      "id": "631ff401-ba22-47de-b23d-cdeb7eecbcc7",
+      "name": "2. Validate Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond-input-valid",
+              "leftValue": "={{$json.isValid}}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "25f61bcf-6f54-4622-9116-fadc21ce8f66",
+      "name": "Is Input Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        464,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "ei1",
+              "name": "status",
+              "type": "string",
+              "value": "invalid_input"
+            },
+            {
+              "id": "ei2",
+              "name": "correlationId",
+              "type": "string",
+              "value": "={{$json.correlationId}}"
+            },
+            {
+              "id": "ei3",
+              "name": "missingFields",
+              "type": "array",
+              "value": "={{$json.missingFields}}"
+            },
+            {
+              "id": "ei4",
+              "name": "receivedAt",
+              "type": "string",
+              "value": "={{$now.toISO()}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "237e8168-0a49-4f42-94d0-f2776a948363",
+      "name": "Error Output - Invalid Input",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        688,
+        608
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 3. Correlation & Deduplication Engine\n// Core stateful logic. Uses n8n's built-in workflow static data as the\n// incident store (see README for production scaling notes).\n//\n// Rule 1: same correlationId seen before -> exact duplicate, ignore.\n// Rule 2: same grouping key (fiberRoute, or siteId if no route) with an\n//         OPEN incident (last alarm within the 5-minute window) -> merge\n//         as a child alarm into that incident (this is how a Fiber Cut's\n//         cascading LOS/High BER/etc. alarms all fold into one incident).\n// Rule 3: otherwise -> create a new master incident.\n//\n// A lightweight retention prune runs on every execution to keep the store\n// bounded (removes incidents/index entries older than RETENTION_MS).\n\nconst item = $input.first().json;\nconst staticData = $getWorkflowStaticData('global');\n\nif (!staticData.incidents) staticData.incidents = {};\nif (!staticData.correlationIdIndex) staticData.correlationIdIndex = {};\nif (!staticData.groupIndex) staticData.groupIndex = {};\n\nconst WINDOW_MS = 5 * 60 * 1000; // 5-minute correlation window\nconst RETENTION_MS = 24 * 60 * 60 * 1000; // 24-hour retention for pruning\nconst nowMs = Date.now();\n\nfunction isExpired(incident, windowMs) {\n  return (nowMs - new Date(incident.lastAlarmAt).getTime()) > windowMs;\n}\n\n// --- Retention pruning (bounds memory growth; see README Performance Optimization) ---\nfor (const cid of Object.keys(staticData.correlationIdIndex)) {\n  const incId = staticData.correlationIdIndex[cid];\n  const inc = staticData.incidents[incId];\n  if (!inc || isExpired(inc, RETENTION_MS)) delete staticData.correlationIdIndex[cid];\n}\nfor (const key of Object.keys(staticData.groupIndex)) {\n  const incId = staticData.groupIndex[key];\n  const inc = staticData.incidents[incId];\n  if (!inc || isExpired(inc, RETENTION_MS)) delete staticData.groupIndex[key];\n}\nfor (const incId of Object.keys(staticData.incidents)) {\n  const inc = staticData.incidents[incId];\n  if (isExpired(inc, RETENTION_MS)) delete staticData.incidents[incId];\n}\n\n// --- Rule 1: exact duplicate (same correlationId already processed) ---\nif (staticData.correlationIdIndex[item.correlationId]) {\n  const incidentId = staticData.correlationIdIndex[item.correlationId];\n  const incident = staticData.incidents[incidentId];\n  incident.duplicateCount = (incident.duplicateCount || 0) + 1;\n  incident.lastAlarmAt = new Date().toISOString();\n\n  return [{\n    json: {\n      outcome: 'duplicate_ignored',\n      incidentId: incident.incidentId,\n      rootAlarm: incident.rootAlarm,\n      childAlarms: incident.childAlarms,\n      occurrenceCount: incident.occurrenceCount,\n      duplicateCount: incident.duplicateCount,\n      impact: incident.impact,\n      affectedCustomers: incident.affectedCustomers,\n      businessPriority: incident.businessPriority,\n      siteId: incident.siteId,\n      fiberRoute: incident.fiberRoute,\n      vendor: incident.vendor,\n      region: incident.region,\n      createdAt: incident.createdAt,\n      lastAlarmAt: incident.lastAlarmAt\n    }\n  }];\n}\n\n// --- Grouping key: prefer fiber route (catches multi-site route-level incidents), fall back to Site ID ---\nconst groupKey = item.fiberRoute ? `route:${item.fiberRoute}` : `site:${item.siteId}`;\n\nconst existingIncidentId = staticData.groupIndex[groupKey];\nconst existingIncident = existingIncidentId ? staticData.incidents[existingIncidentId] : null;\n\n// --- Rule 2: merge into an open incident for this group within the 5-minute window ---\nif (existingIncident && !isExpired(existingIncident, WINDOW_MS)) {\n  existingIncident.childAlarms.push({\n    correlationId: item.correlationId,\n    alarmType: item.alarmType,\n    nodeName: item.nodeName,\n    priority: item.priority || null,\n    timestamp: item.timestamp\n  });\n  existingIncident.occurrenceCount = existingIncident.childAlarms.length + 1; // +1 for the root alarm\n  existingIncident.lastAlarmAt = new Date().toISOString();\n  existingIncident.affectedCustomers = Math.max(existingIncident.affectedCustomers || 0, item.customerCount || 0);\n\n  staticData.correlationIdIndex[item.correlationId] = existingIncident.incidentId;\n\n  return [{\n    json: {\n      outcome: 'merged_child',\n      incidentId: existingIncident.incidentId,\n      rootAlarm: existingIncident.rootAlarm,\n      childAlarms: existingIncident.childAlarms,\n      occurrenceCount: existingIncident.occurrenceCount,\n      duplicateCount: existingIncident.duplicateCount || 0,\n      impact: existingIncident.impact,\n      affectedCustomers: existingIncident.affectedCustomers,\n      businessPriority: existingIncident.businessPriority,\n      siteId: existingIncident.siteId,\n      fiberRoute: existingIncident.fiberRoute,\n      vendor: existingIncident.vendor,\n      region: existingIncident.region,\n      createdAt: existingIncident.createdAt,\n      lastAlarmAt: existingIncident.lastAlarmAt\n    }\n  }];\n}\n\n// --- Rule 3: create a new master incident ---\nconst incidentId = 'INC-' + nowMs + '-' + Math.random().toString(36).slice(2, 8).toUpperCase();\nconst nowIso = new Date().toISOString();\n\nconst incident = {\n  incidentId,\n  siteId: item.siteId,\n  fiberRoute: item.fiberRoute || null,\n  vendor: item.vendor,\n  region: item.region,\n  rootAlarm: {\n    correlationId: item.correlationId,\n    alarmType: item.alarmType,\n    nodeName: item.nodeName,\n    priority: item.priority || null,\n    timestamp: item.timestamp\n  },\n  childAlarms: [],\n  occurrenceCount: 1,\n  duplicateCount: 0,\n  impact: item.customerImpact || item.impact || null,\n  businessPriority: item.businessPriority || null,\n  affectedCustomers: item.customerCount || 0,\n  createdAt: nowIso,\n  lastAlarmAt: nowIso\n};\n\nstaticData.incidents[incidentId] = incident;\nstaticData.groupIndex[groupKey] = incidentId;\nstaticData.correlationIdIndex[item.correlationId] = incidentId;\n\nreturn [{\n  json: {\n    outcome: 'new_master_incident',\n    incidentId: incident.incidentId,\n    rootAlarm: incident.rootAlarm,\n    childAlarms: incident.childAlarms,\n    occurrenceCount: incident.occurrenceCount,\n    duplicateCount: incident.duplicateCount,\n    impact: incident.impact,\n    affectedCustomers: incident.affectedCustomers,\n    businessPriority: incident.businessPriority,\n    siteId: incident.siteId,\n    fiberRoute: incident.fiberRoute,\n    vendor: incident.vendor,\n    region: incident.region,\n    createdAt: incident.createdAt,\n    lastAlarmAt: incident.lastAlarmAt\n  }\n}];"
+      },
+      "id": "c0a692bb-11bd-45ba-8187-9dc75a67034d",
+      "name": "3. Correlation & Deduplication Engine",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        688,
+        240
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 500
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond-duplicate",
+              "leftValue": "={{$json.outcome}}",
+              "rightValue": "duplicate_ignored",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "0eec6ef8-3d97-49b9-94e2-439fe1150930",
+      "name": "Is Duplicate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        912,
+        240
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "42947106-849f-4268-a7ff-8fe429394f14",
+      "name": "4a. Duplicate Ignored",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1120,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond-merged",
+              "leftValue": "={{$json.outcome}}",
+              "rightValue": "merged_child",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "313f1a92-dbf3-4331-bbc2-a95d2ce83c5f",
+      "name": "Is Merged Child?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        384
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "56d3e16c-1465-4e14-82b7-2cba14a3d2ed",
+      "name": "4b. Merged - Child Alarm Added",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1344,
+        240
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "72dcd03b-8b05-44e7-918b-fac8abadcc99",
+      "name": "4c. New Master Incident Created",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1344,
+        528
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### Business rules implemented\n1. Fiber Cut at a site cascades LOS / High BER / other alarms on the same fiber route (or site) into ONE master incident as child alarms.\n2. Same Site ID (or fiber route) receiving alarms within a 5-minute sliding window -> merged into the open incident, not a new one.\n3. Same Correlation ID seen again -> exact duplicate, ignored (duplicateCount++, no new incident/child).\n4. Any new distinct alarm folded in -> occurrenceCount++ (root + all children).",
+        "height": 220,
+        "width": 340
+      },
+      "id": "80a503d7-850b-42fb-b051-5e4f40853d5e",
+      "name": "Sticky Note - Business Rules",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        688,
+        608
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### Error handling & performance\nMissing required fields -> Error Output - Invalid Input, never reaches the engine.\n\nThe engine node has retry enabled (2 attempts) for transient failures, though as pure in-memory logic it rarely fails.\n\nStorage uses n8n workflow static data (zero external setup). A retention prune runs every execution to bound memory. See README for production scaling (Redis/Postgres) notes and concurrency caveats.",
+        "height": 220,
+        "width": 340
+      },
+      "id": "2d7b0ccc-9cda-45da-b484-022b051cb24e",
+      "name": "Sticky Note - Performance & Storage",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1040,
+        608
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "cachedResultName": "WF-06 - Intelligent Routing & Decision Engine",
+          "mode": "id",
+          "value": "T1CGeiqzkL8XDFEr"
+        },
+        "workflowInputs": {
+          "mappingMode": "autoMapInputData",
+          "value": null
+        },
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "2f5c617e-41e0-4899-a781-894c18708675",
+      "name": "5. Execute WF-06 Routing",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        1568,
+        384
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "1. Execute Workflow Trigger": {
+      "main": [
+        [
+          {
+            "node": "2. Validate Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "2. Validate Input": {
+      "main": [
+        [
+          {
+            "node": "Is Input Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Input Valid?": {
+      "main": [
+        [
+          {
+            "node": "3. Correlation & Deduplication Engine",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Error Output - Invalid Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "3. Correlation & Deduplication Engine": {
+      "main": [
+        [
+          {
+            "node": "Is Duplicate?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Duplicate?": {
+      "main": [
+        [
+          {
+            "node": "4a. Duplicate Ignored",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Is Merged Child?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Merged Child?": {
+      "main": [
+        [
+          {
+            "node": "4b. Merged - Child Alarm Added",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "4c. New Master Incident Created",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "4b. Merged - Child Alarm Added": {
+      "main": [
+        [
+          {
+            "node": "5. Execute WF-06 Routing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "4c. New Master Incident Created": {
+      "main": [
+        [
+          {
+            "node": "5. Execute WF-06 Routing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": true
+  },
+  "versionId": "b8cbcaf7-5049-4f85-966e-e1fef1c88d61",
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp",
+    "instanceId": "05947142a4f38e4077604ad3dd31b1a8ac91444cd1d3240f77e7b6d160094eee"
+  },
+  "nodeGroups": [],
+  "id": "PHTsuwVrf4KR5wLd",
+  "tags": []
+}

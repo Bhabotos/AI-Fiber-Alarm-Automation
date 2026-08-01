@@ -1,0 +1,16 @@
+.env
+node_modules/
+__pycache__/
+*.log
+.DS_Store
+Thumbs.db
+
+# n8n local runtime/cache (not the workflow JSON exports in workflows/)
+.n8n/
+n8n-export-cache/
+
+# Local scratch/working copies of zipped exports
+*.zip
+
+# Demo video is hosted externally (see demo/README.md), never tracked in Git
+demo/*.mp4

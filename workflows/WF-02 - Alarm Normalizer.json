@@ -1,0 +1,298 @@
+{
+  "name": "WF-02 - Alarm Normalizer",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## WF-02: Alarm Normalizer\n\nStandalone, reusable sub-workflow. Called by WF-01 (Alarm Ingestion) via an 'Execute Workflow' node, passing the raw vendor alarm JSON.\n\nFlow:\nExecute Workflow Trigger -> Detect Vendor & Validate -> [Is Valid?] -> Normalize Fields -> Ensure Correlation ID -> Return Standardized JSON\n\nInvalid alarms are routed to Error Output instead.\n\nNo AI classification, no notification channels, no ticketing - normalization only.",
+        "height": 260,
+        "width": 340
+      },
+      "id": "aea0950e-3502-4492-a3b7-004be5305e48",
+      "name": "Sticky Note - Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "id": "3a81cae5-6b6a-4bc7-a314-7ee497a664a0",
+      "name": "1. Execute Workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        32,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 2. Detect Vendor & Validate\n// Figures out which vendor sent the alarm (using the 'source' tag if present,\n// falling back to structural field-signature matching), then checks that\n// vendor's required raw fields are present.\n\nconst KNOWN_VENDORS = {\n  'Huawei-U2000': ['neName', 'alarmName', 'severity', 'occurTime'],\n  'Nokia-NFM-P': ['objectName', 'problemText', 'perceivedSeverity', 'eventTime'],\n  'Cisco-EPNM': ['managedElement', 'faultDescription', 'faultSeverity', 'timeStamp'],\n  'Juniper-JunosSpace': ['device-name', 'alarm-description', 'alarm-severity', 'alarm-time'],\n  'FiberHome-iManagerU31': ['NEName', 'faultName', 'faultLevel', 'happenTime']\n};\n\nconst STRUCTURAL_SIGNATURES = [\n  { vendor: 'Huawei-U2000', keys: ['neName', 'alarmName', 'occurTime'] },\n  { vendor: 'Nokia-NFM-P', keys: ['objectName', 'problemText', 'eventTime'] },\n  { vendor: 'Cisco-EPNM', keys: ['managedElement', 'faultDescription', 'timeStamp'] },\n  { vendor: 'Juniper-JunosSpace', keys: ['device-name', 'alarm-description', 'alarm-time'] },\n  { vendor: 'FiberHome-iManagerU31', keys: ['NEName', 'faultName', 'happenTime'] }\n];\n\nfunction detectVendor(body) {\n  if (body.source && KNOWN_VENDORS[body.source]) return body.source;\n  for (const sig of STRUCTURAL_SIGNATURES) {\n    if (sig.keys.every((k) => body[k] !== undefined)) return sig.vendor;\n  }\n  return null;\n}\n\nconst items = $input.all();\nconst results = [];\n\nfor (const item of items) {\n  const body = item.json.rawPayload ? item.json.rawPayload : (item.json.body ? item.json.body : item.json);\n  const errors = [];\n\n  if (!body || typeof body !== 'object' || Array.isArray(body)) {\n    errors.push('Input is missing or is not a valid JSON object.');\n  }\n\n  const vendor = body ? detectVendor(body) : null;\n\n  if (!vendor) {\n    errors.push(`Unable to detect vendor from payload. Supported vendors: ${Object.keys(KNOWN_VENDORS).join(', ')}`);\n  } else {\n    const requiredFields = KNOWN_VENDORS[vendor];\n    const missing = requiredFields.filter((f) => body[f] === undefined || body[f] === null || body[f] === '');\n    if (missing.length > 0) {\n      errors.push(`Missing required fields for ${vendor}: ${missing.join(', ')}`);\n    }\n  }\n\n  results.push({\n    json: {\n      isValid: errors.length === 0,\n      vendor: vendor,\n      validationErrors: errors,\n      correlationIdIn: item.json.correlationId || null,\n      rawPayload: body\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "a2b58229-9dfc-4811-8269-abba7ca28c40",
+      "name": "2. Detect Vendor & Validate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond-isvalid",
+              "leftValue": "={{$json.isValid}}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "6e91e8f5-6cd2-4d4b-87ab-656ed4315c06",
+      "name": "Is Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        464,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 3. Normalize Fields\n// Maps each vendor's own field names into the 10 standard fields required\n// by this milestone: vendor, alarmId, nodeName, alarmName, alarmType,\n// severity, timestamp, region, siteId, status.\n\nfunction detectAlarmType(rawText) {\n  const text = (rawText || '').toLowerCase();\n  if (text.includes('fiber cut') || text.includes('fibre cut') || text.includes('fiber break')) return 'FIBER_CUT';\n  if (text.includes('loss of signal') || text.includes('los alarm') || text === 'los') return 'LOS';\n  if (text.includes('loss of frame') || text.includes('lof alarm') || text === 'lof') return 'LOF';\n  if (text.includes('bit error rate') || text.includes('high ber')) return 'HIGH_BER';\n  if (text.includes('attenuation')) return 'HIGH_ATTENUATION';\n  if (text.includes('otn port')) return 'OTN_PORT_DOWN';\n  if (text.includes('dwdm')) return 'DWDM_CARD_FAILURE';\n  if (text.includes('mux') || text.includes('multiplexer')) return 'MUX_FAILURE';\n  if (text.includes('power')) return 'POWER_FAILURE';\n  if (text.includes('node down') || text.includes('device unreachable')) return 'SITE_DOWN';\n  if (text.includes('site') && (text.includes('down') || text.includes('unreachable'))) return 'SITE_DOWN';\n  if (text.includes('link down') || text.includes('interface down') || text.includes('ethernet link')) return 'LINK_DOWN';\n  if (text.includes('temperature')) return 'TEMPERATURE_ALARM';\n  return 'OTHER';\n}\n\nfunction normalizeSeverity(rawSeverity) {\n  const s = (rawSeverity || '').toString().toUpperCase();\n  if (s.includes('CRIT')) return 'Critical';\n  if (s.includes('MAJOR')) return 'Major';\n  if (s.includes('MINOR')) return 'Minor';\n  if (s.includes('WARN')) return 'Warning';\n  return 'Warning';\n}\n\nfunction toIsoUtc(dateStr) {\n  if (!dateStr) return null;\n  const trimmed = dateStr.toString().trim();\n  if (/Z$|[+-]\\d{2}:\\d{2}$/.test(trimmed)) {\n    return new Date(trimmed).toISOString();\n  }\n  const isoLike = trimmed.replace(' ', 'T') + '+06:00';\n  return new Date(isoLike).toISOString();\n}\n\nconst items = $input.all();\nconst results = [];\n\nfor (const item of items) {\n  const body = item.json.rawPayload;\n  const vendor = item.json.vendor;\n  let mapped = {};\n\n  switch (vendor) {\n    case 'Huawei-U2000':\n      mapped = { alarmId: body.alarmId || null, nodeName: body.neName, alarmNameRaw: body.alarmName, severityRaw: body.severity, timestampRaw: body.occurTime, region: body.location || null };\n      break;\n    case 'Nokia-NFM-P':\n      mapped = { alarmId: body.alarmRef || null, nodeName: body.objectName, alarmNameRaw: body.problemText, severityRaw: body.perceivedSeverity, timestampRaw: body.eventTime, region: body.siteName || null };\n      break;\n    case 'Cisco-EPNM':\n      mapped = { alarmId: body.eventId || null, nodeName: body.managedElement, alarmNameRaw: body.faultDescription, severityRaw: body.faultSeverity, timestampRaw: body.timeStamp, region: body.deviceLocation || null };\n      break;\n    case 'Juniper-JunosSpace':\n      mapped = { alarmId: body.alarmId || null, nodeName: body['device-name'], alarmNameRaw: body['alarm-description'], severityRaw: body['alarm-severity'], timestampRaw: body['alarm-time'], region: body.site || null };\n      break;\n    case 'FiberHome-iManagerU31':\n      mapped = { alarmId: body.alarmSerial || null, nodeName: body.NEName, alarmNameRaw: body.faultName, severityRaw: body.faultLevel, timestampRaw: body.happenTime, region: body.region || null };\n      break;\n    default:\n      mapped = { alarmId: null, nodeName: null, alarmNameRaw: null, severityRaw: null, timestampRaw: null, region: null };\n  }\n\n  results.push({\n    json: {\n      vendor: vendor,\n      alarmId: mapped.alarmId,\n      nodeName: mapped.nodeName,\n      siteId: mapped.nodeName,\n      alarmName: mapped.alarmNameRaw,\n      alarmType: detectAlarmType(mapped.alarmNameRaw),\n      severity: normalizeSeverity(mapped.severityRaw),\n      timestamp: toIsoUtc(mapped.timestampRaw),\n      region: mapped.region,\n      status: 'New',\n      correlationIdIn: item.json.correlationIdIn,\n      rawPayload: body\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "56989081-77dd-49d4-ae79-cd9dacc144a3",
+      "name": "3. Normalize Fields",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        688,
+        208
+      ],
+      "retryOnFail": true,
+      "maxTries": 2
+    },
+    {
+      "parameters": {
+        "jsCode": "// 4. Ensure Correlation ID\n// Keeps the correlationId if the calling workflow (WF-01) already assigned\n// one; generates a new UUID only if it is missing.\n\nfunction generateUUID() {\n  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {\n    const r = (Math.random() * 16) | 0;\n    const v = c === 'x' ? r : (r & 0x3) | 0x8;\n    return v.toString(16);\n  });\n}\n\nreturn $input.all().map((item) => {\n  const { correlationIdIn, ...rest } = item.json;\n  return {\n    json: {\n      correlationId: correlationIdIn || generateUUID(),\n      ...rest\n    }\n  };\n});"
+      },
+      "id": "7c05583f-d8de-4992-a95a-18ffee69c0bb",
+      "name": "4. Ensure Correlation ID",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        912,
+        208
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "10e4a992-c541-47db-a0f2-2b349aaf45d0",
+      "name": "5. Return Standardized JSON",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1120,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "e1",
+              "name": "status",
+              "type": "string",
+              "value": "invalid"
+            },
+            {
+              "id": "e2",
+              "name": "vendor",
+              "type": "string",
+              "value": "={{$json.vendor}}"
+            },
+            {
+              "id": "e3",
+              "name": "errors",
+              "type": "array",
+              "value": "={{$json.validationErrors}}"
+            },
+            {
+              "id": "e4",
+              "name": "rawPayload",
+              "type": "object",
+              "value": "={{$json.rawPayload}}"
+            },
+            {
+              "id": "e5",
+              "name": "receivedAt",
+              "type": "string",
+              "value": "={{$now.toISO()}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "9106896a-c3c6-46e7-a653-ec3dd6a3fc5a",
+      "name": "Error Output",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        688,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### Error handling\nAlarms with an undetectable vendor or missing required raw fields never reach Normalize Fields. They flow straight to 'Error Output' with status='invalid', the reason(s), and the original raw payload preserved - nothing is dropped silently.\n\n'3. Normalize Fields' has retry enabled (2 attempts) for transient failures.",
+        "height": 180,
+        "width": 300
+      },
+      "id": "1252530e-698f-4c94-82ad-c527f7ba7fe1",
+      "name": "Sticky Note - Error Handling",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        688,
+        688
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "cachedResultName": "WF-03 - AI Classification Engine",
+          "mode": "id",
+          "value": "rl8C5Lsc7z4fbv5X"
+        },
+        "workflowInputs": {
+          "mappingMode": "autoMapInputData",
+          "value": null
+        },
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "d11a22ca-cbf2-4859-8f27-30479ad3ebf7",
+      "name": "6. Execute WF-03 Classification",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        1344,
+        208
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "1. Execute Workflow Trigger": {
+      "main": [
+        [
+          {
+            "node": "2. Detect Vendor & Validate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "2. Detect Vendor & Validate": {
+      "main": [
+        [
+          {
+            "node": "Is Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Valid?": {
+      "main": [
+        [
+          {
+            "node": "3. Normalize Fields",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Error Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "3. Normalize Fields": {
+      "main": [
+        [
+          {
+            "node": "4. Ensure Correlation ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "4. Ensure Correlation ID": {
+      "main": [
+        [
+          {
+            "node": "5. Return Standardized JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "5. Return Standardized JSON": {
+      "main": [
+        [
+          {
+            "node": "6. Execute WF-03 Classification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": true
+  },
+  "versionId": "f936c0e2-d7f5-4d40-8c27-5765867eb7aa",
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp",
+    "instanceId": "05947142a4f38e4077604ad3dd31b1a8ac91444cd1d3240f77e7b6d160094eee"
+  },
+  "nodeGroups": [],
+  "id": "lpJzpskuA7RO06vm",
+  "tags": []
+}

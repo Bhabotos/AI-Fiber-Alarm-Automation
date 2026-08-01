@@ -1,0 +1,314 @@
+{
+  "name": "WF-07 Notification Dispatcher",
+  "nodes": [
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "id": "b4380b50-2386-4a80-8343-096f3690f89f",
+      "name": "1. Execute Workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        240,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 2. Validate Input\n// Confirms the routing decision handed off by WF-06 has what the\n// notification dispatcher needs to prepare and route a payload.\n\nconst item = $input.first().json;\n\nconst incidentId = item.incidentId;\nconst siteId = item.siteId;\nconst assignedTeam = item.assignedTeam;\nconst priority = item.priority;\nconst notificationPolicy = item.notificationPolicy;\n\nconst missing = [];\nif (!incidentId) missing.push('incidentId');\nif (!siteId) missing.push('siteId');\nif (!assignedTeam) missing.push('assignedTeam');\nif (!priority) missing.push('priority');\nif (!notificationPolicy) missing.push('notificationPolicy');\n\nreturn [{\n  json: {\n    isValid: missing.length === 0,\n    missingFields: missing,\n    ...item\n  }\n}];"
+      },
+      "id": "0be9e450-2cc7-4174-8e3b-b16b2d04fc39",
+      "name": "2. Validate Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        464,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond-input-valid",
+              "leftValue": "={{$json.isValid}}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "282af7ed-8052-409b-ad24-ae3e152d9ef2",
+      "name": "Is Input Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        688,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 3. Resolve Notification Destination & Channel\n// Maps the incident's assigned team to a Telegram chat destination\n// using a team -> chat mapping table (same pattern as WF-06's Business\n// Rule Matrix). Teams without an explicit mapping fall back to the NOC\n// default chat rather than leaving the incident undeliverable. Channel\n// is fixed to 'telegram' for this milestone; additional channels are a\n// future milestone's concern, not this workflow's.\n//\n// Chat IDs below are placeholders. Replace each with the real Telegram\n// chat/group ID before this feeds the telegram-notifier workflow.\n\nconst item = $input.first().json;\n\nconst assignedTeam = item.assignedTeam;\n\nconst TEAM_CHAT_MAP = {\n  'Transmission Team': 'TELEGRAM_CHAT_TRANSMISSION_TEAM',\n  'Power Team': 'TELEGRAM_CHAT_POWER_TEAM',\n  'Access Network Team': 'TELEGRAM_CHAT_ACCESS_NETWORK_TEAM',\n  'IP Network Team': 'TELEGRAM_CHAT_IP_NETWORK_TEAM',\n  'IP Core Team': 'TELEGRAM_CHAT_IP_CORE_TEAM',\n  'Transmission Monitoring': 'TELEGRAM_CHAT_TRANSMISSION_MONITORING',\n  'Site Maintenance Team': 'TELEGRAM_CHAT_SITE_MAINTENANCE_TEAM',\n  'NOC': 'TELEGRAM_CHAT_NOC'\n};\n\nconst DEFAULT_CHAT = 'TELEGRAM_CHAT_NOC';\n\nconst destinationMatched = Object.prototype.hasOwnProperty.call(TEAM_CHAT_MAP, assignedTeam);\nconst chatId = destinationMatched ? TEAM_CHAT_MAP[assignedTeam] : DEFAULT_CHAT;\n\nreturn [{\n  json: {\n    ...item,\n    channel: 'telegram',\n    chatId,\n    destinationMatched\n  }\n}];"
+      },
+      "id": "4dc53990-a4f9-4769-a991-04fb692ab7ce",
+      "name": "3. Resolve Notification Destination & Channel",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        912,
+        208
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 500
+    },
+    {
+      "parameters": {
+        "jsCode": "// 4. Build Notification Payload\n// Composes the human-readable Telegram message and assembles the final\n// structured output. Does NOT send anything -- WF-07 only prepares and\n// routes the notification payload. Delivery is a separate workflow\n// (telegram-notifier) planned for the next milestone. Defaults\n// gracefully when optional upstream fields are missing, matching\n// WF-06's philosophy of never blocking on a partial incident.\n\nconst item = $input.first().json;\n\nconst incidentId = item.incidentId;\nconst correlationId = item.correlationId || null;\nconst siteId = item.siteId;\nconst assignedTeam = item.assignedTeam;\nconst priority = item.priority;\nconst notificationPolicy = item.notificationPolicy;\nconst escalationLevel = item.escalationLevel || 'L2';\nconst immediateEscalation = item.immediateEscalation === true;\nconst slaDeadline = item.slaDeadline || null;\nconst businessImpact = item.businessImpact || 'Business impact not available';\nconst affectedCustomers = typeof item.affectedCustomers === 'number' ? item.affectedCustomers : 0;\nconst chatId = item.chatId;\nconst channel = item.channel || 'telegram';\nconst destinationMatched = item.destinationMatched === true;\n\nconst urgencyMarker = immediateEscalation ? '\\uD83D\\uDEA8 IMMEDIATE ESCALATION \\uD83D\\uDEA8\\n' : '';\n\nconst messageTitle = urgencyMarker + '[' + priority + '] Incident ' + incidentId;\n\nconst messageBody =\n  'Team: ' + assignedTeam + '\\n' +\n  'Priority: ' + priority + ' (' + notificationPolicy + ')\\n' +\n  'Escalation: ' + escalationLevel + '\\n' +\n  'SLA Deadline: ' + (slaDeadline || 'not set') + '\\n' +\n  'Site: ' + siteId + '\\n' +\n  'Impact: ' + businessImpact;\n\nreturn [{\n  json: {\n    incidentId,\n    correlationId,\n    siteId,\n    channel,\n    destination: {\n      team: assignedTeam,\n      chatId,\n      destinationMatched\n    },\n    priority,\n    notificationPolicy,\n    escalationLevel,\n    immediateEscalation,\n    messageTitle,\n    messageBody,\n    slaDeadline,\n    businessImpact,\n    affectedCustomers,\n    dispatchStatus: 'ready_for_dispatch',\n    preparedAt: new Date().toISOString(),\n    nextWorkflow: 'telegram-notifier'\n  }\n}];"
+      },
+      "id": "981a95af-66ed-4aa9-8739-e77398a7a11c",
+      "name": "4. Build Notification Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        208
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 500
+    },
+    {
+      "parameters": {},
+      "id": "2796c4d5-4f12-4fad-9e4a-366546de10f9",
+      "name": "5. Return Notification Payload",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1344,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "ei1",
+              "name": "status",
+              "type": "string",
+              "value": "invalid_input"
+            },
+            {
+              "id": "ei2",
+              "name": "incidentId",
+              "type": "string",
+              "value": "={{$json.incidentId}}"
+            },
+            {
+              "id": "ei3",
+              "name": "missingFields",
+              "type": "array",
+              "value": "={{$json.missingFields}}"
+            },
+            {
+              "id": "ei4",
+              "name": "receivedAt",
+              "type": "string",
+              "value": "={{$now.toISO()}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "34433dc5-ec0a-4b53-b691-27a56dd853e7",
+      "name": "Error Output - Invalid Input",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        912,
+        464
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## WF-07 - Notification Dispatcher\n\nMilestone 8. Standalone, reusable sub-workflow following the same pattern as WF-02 through WF-06. Called by WF-06 via an Execute Workflow node. Takes one routing decision and PREPARES + ROUTES a notification payload (destination + formatted message). It does NOT send anything -- actual Telegram delivery is a separate workflow (telegram-notifier), planned for the next milestone.",
+        "height": 200,
+        "width": 520,
+        "color": 4
+      },
+      "id": "ac1672f7-c535-45b9-af67-874158da67ba",
+      "name": "Sticky Note c802f719",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        208,
+        128
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Team -> Telegram Chat Mapping\n\nChat IDs are placeholders (TELEGRAM_CHAT_*). Replace with real Telegram chat/group IDs before wiring the telegram-notifier workflow. Unmapped teams fall back to the NOC default chat rather than being undeliverable.",
+        "height": 200,
+        "width": 300,
+        "color": 5
+      },
+      "id": "e78b4aa8-d996-4a7c-beb3-a61f2e7bfd23",
+      "name": "Sticky Note f5e6b91f",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        912,
+        -112
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Error Handling\n\n- Missing incidentId / siteId / assignedTeam / priority / notificationPolicy -> Error Output - Invalid Input, listing exactly what is missing.\n- assignedTeam not in the mapping table -> not an error, falls back to the NOC default chat.\n- businessImpact / affectedCustomers / slaDeadline missing -> defaults gracefully, payload still completes.",
+        "height": 200,
+        "width": 300,
+        "color": 3
+      },
+      "id": "de452ba4-29d7-4995-8ef9-7cdd78f39265",
+      "name": "Sticky Note 55dfa72a",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1120,
+        448
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "cachedResultName": "WF-08 Telegram Notifier",
+          "mode": "id",
+          "value": "SgKj749jIq3b0Q6D"
+        },
+        "workflowInputs": {
+          "mappingMode": "autoMapInputData",
+          "value": null
+        },
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "53af19a7-7a4e-4c0c-9693-b2eeaa306500",
+      "name": "6. Execute WF-08 Telegram Notifier",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        1568,
+        208
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "1. Execute Workflow Trigger": {
+      "main": [
+        [
+          {
+            "node": "2. Validate Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "2. Validate Input": {
+      "main": [
+        [
+          {
+            "node": "Is Input Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Input Valid?": {
+      "main": [
+        [
+          {
+            "node": "3. Resolve Notification Destination & Channel",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Error Output - Invalid Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "3. Resolve Notification Destination & Channel": {
+      "main": [
+        [
+          {
+            "node": "4. Build Notification Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "4. Build Notification Payload": {
+      "main": [
+        [
+          {
+            "node": "5. Return Notification Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "5. Return Notification Payload": {
+      "main": [
+        [
+          {
+            "node": "6. Execute WF-08 Telegram Notifier",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": true
+  },
+  "versionId": "f37d95e1-e5f8-4143-84fb-5eae260c4025",
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp",
+    "instanceId": "05947142a4f38e4077604ad3dd31b1a8ac91444cd1d3240f77e7b6d160094eee"
+  },
+  "nodeGroups": [],
+  "id": "YQyl59k4lSA0fTKA",
+  "tags": []
+}

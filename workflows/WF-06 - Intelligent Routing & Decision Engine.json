@@ -1,0 +1,388 @@
+{
+  "name": "WF-06 - Intelligent Routing & Decision Engine",
+  "nodes": [
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "id": "a348f253-e212-45d2-921c-a7cea3c076aa",
+      "name": "1. Execute Workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        240,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 2. Validate Input\n// Confirms the correlated incident from WF-05 has what the routing\n// engine needs to make a team/priority/policy decision.\n\nconst REQUIRED = ['incidentId', 'siteId', 'vendor', 'region'];\n\nconst item = $input.first().json;\nconst missing = REQUIRED.filter((f) => item[f] === undefined || item[f] === null || item[f] === '');\n\nif (!item.rootAlarm || !item.rootAlarm.alarmType) {\n  missing.push('rootAlarm.alarmType');\n}\n\nreturn [{\n  json: {\n    isValid: missing.length === 0,\n    missingFields: missing,\n    ...item\n  }\n}];"
+      },
+      "id": "9f85221a-d0c7-4d9a-9576-7f8243a2aa67",
+      "name": "2. Validate Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        464,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond-input-valid",
+              "leftValue": "={{ $json.isValid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "cfadb076-9122-4c82-961d-76d666581f17",
+      "name": "Is Input Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        688,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 3. Determine Team Assignment\n// Business rule matrix: maps each alarmType to the team responsible.\n// Mirrors WF-03's alarm-type business rules (Fiber Cut -> Transmission,\n// LOS -> NOC, High BER -> Transmission Monitoring, Power Failure -> Power,\n// Mux Failure -> Transmission), extended to cover every alarmType WF-02\n// can produce, and expressed using WF-07's exact team-name conventions so\n// every alarm resolves to a real Telegram destination downstream.\n// Unmapped/unknown alarm types fall back to NOC rather than being\n// unroutable.\n\nconst item = $input.first().json;\nconst alarmType = item.rootAlarm ? item.rootAlarm.alarmType : null;\n\nconst ALARM_TYPE_TEAM_MAP = {\n  FIBER_CUT: 'Transmission Team',\n  OTN_PORT_DOWN: 'Transmission Team',\n  DWDM_CARD_FAILURE: 'Transmission Team',\n  MUX_FAILURE: 'Transmission Team',\n  LOS: 'NOC',\n  LOF: 'NOC',\n  HIGH_BER: 'Transmission Monitoring',\n  HIGH_ATTENUATION: 'Transmission Monitoring',\n  POWER_FAILURE: 'Power Team',\n  SITE_DOWN: 'Site Maintenance Team',\n  TEMPERATURE_ALARM: 'Site Maintenance Team',\n  LINK_DOWN: 'IP Network Team',\n  OTHER: 'NOC'\n};\n\nconst DEFAULT_TEAM = 'NOC';\nconst teamMatched = Object.prototype.hasOwnProperty.call(ALARM_TYPE_TEAM_MAP, alarmType);\nconst assignedTeam = teamMatched ? ALARM_TYPE_TEAM_MAP[alarmType] : DEFAULT_TEAM;\n\nreturn [{\n  json: {\n    ...item,\n    assignedTeam,\n    teamMatched\n  }\n}];"
+      },
+      "id": "2dbceb16-0e29-473c-aa32-600eb6451cad",
+      "name": "3. Determine Team Assignment",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        912,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 4. Determine Priority & Notification Policy\n// Priority: uses the root alarm's own priority (set by WF-03's AI\n// classification + business rules) as the single source of truth, since\n// that is the most alarm-specific signal available. Falls back to\n// deriving priority from WF-04's businessPriority score only if the root\n// alarm priority is missing.\n// notificationPolicy: maps priority to how urgently WF-07/WF-08 should\n// treat delivery.\n\nconst item = $input.first().json;\n\nfunction priorityFromBusinessPriority(bp) {\n  if (!bp) return 'Warning';\n  if (bp.indexOf('P1') === 0) return 'Critical';\n  if (bp.indexOf('P2') === 0) return 'Major';\n  if (bp.indexOf('P3') === 0) return 'Minor';\n  return 'Warning';\n}\n\nconst priority = (item.rootAlarm && item.rootAlarm.priority)\n  || priorityFromBusinessPriority(item.businessPriority);\n\nconst NOTIFICATION_POLICY_MAP = {\n  Critical: 'immediate',\n  Major: 'urgent',\n  Minor: 'standard',\n  Warning: 'digest'\n};\n\nconst notificationPolicy = NOTIFICATION_POLICY_MAP[priority] || 'standard';\n\nreturn [{\n  json: {\n    ...item,\n    priority,\n    notificationPolicy\n  }\n}];"
+      },
+      "id": "97b2bfd6-f552-464d-8bea-82f58689a3c2",
+      "name": "4. Determine Priority & Notification Policy",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1136,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 5. Compute Escalation & SLA\n// escalationLevel: L1 (highest) for Critical priority or alarm storms\n// (occurrenceCount > 3 correlated child alarms), L2 for Major, L3 for\n// Minor/Warning.\n// immediateEscalation: true whenever escalationLevel is L1 - drives\n// WF-07's \"IMMEDIATE ESCALATION\" marker.\n// slaDeadline: now + a response window sized to priority.\n\nconst item = $input.first().json;\n\nconst SLA_MINUTES = {\n  Critical: 30,\n  Major: 120,\n  Minor: 480,\n  Warning: 1440\n};\n\nconst occurrenceCount = typeof item.occurrenceCount === 'number' ? item.occurrenceCount : 1;\nconst isAlarmStorm = occurrenceCount > 3;\n\nlet escalationLevel;\nif (item.priority === 'Critical' || isAlarmStorm) {\n  escalationLevel = 'L1';\n} else if (item.priority === 'Major') {\n  escalationLevel = 'L2';\n} else {\n  escalationLevel = 'L3';\n}\n\nconst immediateEscalation = escalationLevel === 'L1';\n\nconst slaMinutes = SLA_MINUTES[item.priority] || SLA_MINUTES.Warning;\nconst slaDeadline = new Date(Date.now() + slaMinutes * 60 * 1000).toISOString();\n\nreturn [{\n  json: {\n    ...item,\n    escalationLevel,\n    immediateEscalation,\n    slaDeadline,\n    isAlarmStorm\n  }\n}];"
+      },
+      "id": "ecf3fa3a-4ef7-4c9b-9e6e-c9a6097c2be5",
+      "name": "5. Compute Escalation & SLA",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1360,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 6. Build Routing Decision\n// Assembles the final routing decision in the exact shape WF-07's\n// '2. Validate Input' requires (incidentId, siteId, assignedTeam,\n// priority, notificationPolicy), plus the optional fields WF-07's\n// '4. Build Notification Payload' uses when present (correlationId,\n// escalationLevel, immediateEscalation, slaDeadline, businessImpact,\n// affectedCustomers). This is the payload that closes the WF-05 -> WF-07\n// schema gap.\n\nconst item = $input.first().json;\n\nconst businessImpact = [\n  item.businessPriority || null,\n  item.impact ? (item.impact + ' customer impact') : null,\n  typeof item.affectedCustomers === 'number' ? (item.affectedCustomers + ' customers affected') : null\n].filter(Boolean).join(' - ') || 'Business impact not available';\n\nreturn [{\n  json: {\n    incidentId: item.incidentId,\n    correlationId: (item.rootAlarm && item.rootAlarm.correlationId) || null,\n    siteId: item.siteId,\n    assignedTeam: item.assignedTeam,\n    priority: item.priority,\n    notificationPolicy: item.notificationPolicy,\n    escalationLevel: item.escalationLevel,\n    immediateEscalation: item.immediateEscalation,\n    slaDeadline: item.slaDeadline,\n    businessImpact,\n    affectedCustomers: typeof item.affectedCustomers === 'number' ? item.affectedCustomers : 0,\n    vendor: item.vendor,\n    region: item.region,\n    routedAt: new Date().toISOString(),\n    nextWorkflow: 'notification-dispatcher'\n  }\n}];"
+      },
+      "id": "c3987ab8-d687-4d86-86ce-b4ddcfdd1fa5",
+      "name": "6. Build Routing Decision",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1584,
+        208
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "7d66bdd5-f252-4a72-8b2e-406e99bbdfb9",
+      "name": "7. Return Routing Decision",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1808,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "ei1",
+              "name": "status",
+              "type": "string",
+              "value": "invalid_input"
+            },
+            {
+              "id": "ei2",
+              "name": "incidentId",
+              "type": "string",
+              "value": "={{ $json.incidentId }}"
+            },
+            {
+              "id": "ei3",
+              "name": "missingFields",
+              "type": "array",
+              "value": "={{ $json.missingFields }}"
+            },
+            {
+              "id": "ei4",
+              "name": "receivedAt",
+              "type": "string",
+              "value": "={{ $now.toISO() }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "e9a25a39-062d-4bcb-a81f-04ac0c754dca",
+      "name": "Error Output - Invalid Input",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        912,
+        464
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## WF-06 - Intelligent Routing & Decision Engine\n\nStandalone, reusable sub-workflow. Called by WF-05 (Alarm Correlation & Deduplication) via an Execute Workflow node. Takes one correlated incident and decides WHO handles it, HOW urgently, and BY WHEN - producing the assignedTeam, priority, notificationPolicy, escalationLevel, slaDeadline and businessImpact fields that WF-07 (Notification Dispatcher) requires. Closes the WF-05 -> WF-07 schema gap identified in production validation.",
+        "height": 200,
+        "width": 300,
+        "color": 4
+      },
+      "id": "efbb373b-ed75-45f9-aa9c-79fad202e268",
+      "name": "Sticky Note 53300a04",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        192,
+        256
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Team Assignment Matrix\n\nMaps each normalized alarmType (from WF-02) to a team, using the exact team names WF-07 TEAM_CHAT_MAP expects so every alarm resolves to a real Telegram destination. Unmapped alarm types fall back to NOC.",
+        "height": 200,
+        "width": 300,
+        "color": 5
+      },
+      "id": "4bdd1072-3a8e-4d96-8a90-a75d3df1b880",
+      "name": "Sticky Note 886d8b60",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        864,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Priority & Notification Policy\n\nPriority comes from the root alarm own priority (WF-03 AI + business rules) - the most alarm-specific signal available. notificationPolicy maps priority to delivery urgency: Critical -> immediate, Major -> urgent, Minor -> standard, Warning -> digest.",
+        "height": 200,
+        "width": 300,
+        "color": 6
+      },
+      "id": "f450d860-1181-4c3d-b2df-150fc962ff2e",
+      "name": "Sticky Note 31ffa65b",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1088,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Escalation & SLA\n\nescalationLevel L1 (highest) for Critical priority or alarm storms (>3 correlated child alarms), L2 for Major, L3 for Minor/Warning. immediateEscalation drives WF-07 urgency marker. slaDeadline is now + a response window sized to priority (Critical 30m, Major 2h, Minor 8h, Warning 24h).",
+        "height": 200,
+        "width": 300,
+        "color": 7
+      },
+      "id": "9c02d9b3-79c7-47bd-aa13-c534f1984b43",
+      "name": "Sticky Note 7f12db76",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1312,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Error Handling\n\nMissing incidentId / siteId / vendor / region / rootAlarm.alarmType -> Error Output - Invalid Input, listing exactly what is missing. Unmapped alarm type -> not an error, falls back to NOC. Missing rootAlarm.priority -> derived from businessPriority instead of blocking.",
+        "height": 200,
+        "width": 300,
+        "color": 3
+      },
+      "id": "cea90531-f23d-456e-a5b0-9a6ad8499360",
+      "name": "Sticky Note 419f83e0",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        864,
+        416
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "cachedResultName": "WF-07 Notification Dispatcher",
+          "mode": "id",
+          "value": "YQyl59k4lSA0fTKA"
+        },
+        "workflowInputs": {
+          "mappingMode": "autoMapInputData",
+          "value": null
+        },
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "f2b2765b-cda6-490b-a7ab-0638bd13d0d4",
+      "name": "8. Execute WF-07 Notification Dispatcher",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        2032,
+        208
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "1. Execute Workflow Trigger": {
+      "main": [
+        [
+          {
+            "node": "2. Validate Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "2. Validate Input": {
+      "main": [
+        [
+          {
+            "node": "Is Input Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Input Valid?": {
+      "main": [
+        [
+          {
+            "node": "3. Determine Team Assignment",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Error Output - Invalid Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "3. Determine Team Assignment": {
+      "main": [
+        [
+          {
+            "node": "4. Determine Priority & Notification Policy",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "4. Determine Priority & Notification Policy": {
+      "main": [
+        [
+          {
+            "node": "5. Compute Escalation & SLA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "5. Compute Escalation & SLA": {
+      "main": [
+        [
+          {
+            "node": "6. Build Routing Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "6. Build Routing Decision": {
+      "main": [
+        [
+          {
+            "node": "7. Return Routing Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "7. Return Routing Decision": {
+      "main": [
+        [
+          {
+            "node": "8. Execute WF-07 Notification Dispatcher",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": true
+  },
+  "versionId": "c7986aa4-affc-45d5-958a-c6e217b463be",
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp",
+    "instanceId": "05947142a4f38e4077604ad3dd31b1a8ac91444cd1d3240f77e7b6d160094eee"
+  },
+  "nodeGroups": [],
+  "id": "T1CGeiqzkL8XDFEr",
+  "tags": []
+}

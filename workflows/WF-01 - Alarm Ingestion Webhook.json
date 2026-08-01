@@ -1,0 +1,365 @@
+{
+  "name": "WF-01 - Alarm Ingestion Webhook",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## WF-01: Alarm Ingestion Webhook\n\nEntry point for ALL fiber alarms (any vendor/system).\n\n1. Receives raw alarm via HTTPS POST\n2. Validates required fields\n3. Wraps payload into the Standard Alarm Envelope\n4. Hands off (Milestone 3) to WF-02 Normalizer\n\nSecured with Header Auth token. See README.md for setup.",
+        "height": 220,
+        "width": 320
+      },
+      "id": "d1dc5ef0-8915-4088-ba6d-8d9c43a819af",
+      "name": "Sticky Note - Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "fiber-alarm-ingest",
+        "options": {
+          "responseData": "{\"status\": \"received\", \"message\": \"Alarm accepted for processing\"}"
+        }
+      },
+      "id": "b353ee6d-59b9-405f-96e0-bbf11787934c",
+      "name": "1. Alarm Ingestion Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        32,
+        272
+      ],
+      "webhookId": "REPLACE_WITH_GENERATED_WEBHOOK_ID"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 2. Extract & Validate Payload\n// - Reads the raw alarm body\n// - Checks required fields are present. Vendor-agnostic on purpose: only\n//   'source' is required here. No real vendor NMS/EMS sends fields named\n//   'siteId'/'alarmType' (those are WF-02's *normalized output* field\n//   names) -- per-vendor raw field validation is WF-02's job, not WF-01's.\n//   See PRODUCTION_VALIDATION_REPORT.md Finding 1.\n// - Generates a correlationId (UUID) and receivedAt timestamp\n\nfunction generateUUID() {\n  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {\n    const r = (Math.random() * 16) | 0;\n    const v = c === 'x' ? r : (r & 0x3) | 0x8;\n    return v.toString(16);\n  });\n}\n\nconst requiredFields = ['source'];\nconst items = $input.all();\nconst results = [];\n\nfor (const item of items) {\n  const body = item.json.body ? item.json.body : item.json;\n\n  const missing = requiredFields.filter(\n    (f) => body[f] === undefined || body[f] === null || body[f] === ''\n  );\n\n  results.push({\n    json: {\n      isValid: missing.length === 0,\n      missingFields: missing,\n      correlationId: generateUUID(),\n      receivedAt: new Date().toISOString(),\n      rawPayload: body\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "b23d46ec-c827-4bca-b236-db18765fa404",
+      "name": "2. Extract & Validate Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        272
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond-isvalid",
+              "leftValue": "={{$json.isValid}}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "f235f4a7-5a8a-4396-9caf-05aaf2273d32",
+      "name": "3. Is Payload Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        464,
+        272
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a1",
+              "name": "correlationId",
+              "type": "string",
+              "value": "={{$json.correlationId}}"
+            },
+            {
+              "id": "a2",
+              "name": "source",
+              "type": "string",
+              "value": "={{$json.rawPayload.source || 'unknown'}}"
+            },
+            {
+              "id": "a3",
+              "name": "siteId",
+              "type": "string",
+              "value": "={{$json.rawPayload.siteId}}"
+            },
+            {
+              "id": "a4",
+              "name": "alarmType",
+              "type": "string",
+              "value": "={{$json.rawPayload.alarmType}}"
+            },
+            {
+              "id": "a5",
+              "name": "rawSeverity",
+              "type": "string",
+              "value": "={{$json.rawPayload.severity || 'unspecified'}}"
+            },
+            {
+              "id": "a6",
+              "name": "receivedAt",
+              "type": "string",
+              "value": "={{$json.receivedAt}}"
+            },
+            {
+              "id": "a7",
+              "name": "status",
+              "type": "string",
+              "value": "New"
+            },
+            {
+              "id": "a8",
+              "name": "rawPayload",
+              "type": "object",
+              "value": "={{$json.rawPayload}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "bd260879-9075-4b92-821d-dbf6ed6a4123",
+      "name": "4a. Build Standard Alarm Envelope",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        688,
+        144
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "958f7002-f0a6-45ef-91c7-2d08a7fc14a0",
+      "name": "5a. Ready for WF-02 Normalizer",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        912,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "b1",
+              "name": "correlationId",
+              "type": "string",
+              "value": "={{$json.correlationId}}"
+            },
+            {
+              "id": "b2",
+              "name": "receivedAt",
+              "type": "string",
+              "value": "={{$json.receivedAt}}"
+            },
+            {
+              "id": "b3",
+              "name": "status",
+              "type": "string",
+              "value": "Rejected"
+            },
+            {
+              "id": "b4",
+              "name": "rejectionReason",
+              "type": "string",
+              "value": "=Missing required fields: {{$json.missingFields.join(', ')}}"
+            },
+            {
+              "id": "b5",
+              "name": "rawPayload",
+              "type": "object",
+              "value": "={{$json.rawPayload}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "7aa122e6-78a2-4501-8f79-06a7773b0bfc",
+      "name": "4b. Mark Alarm Rejected",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        688,
+        400
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "f32c3570-705f-429a-9a4e-1b80d0d6f75a",
+      "name": "5b. Rejected - Awaiting Audit Logger (Milestone 13)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        912,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### Handoff point\nOutput of this branch is the finalized Standard Alarm Envelope (matches docs/alarm-schema.json).\n\nIn Milestone 3, this NoOp will be replaced by an 'Execute Workflow' node calling WF-02 (alarm-normalizer).",
+        "width": 260
+      },
+      "id": "708f5b6c-defe-4a10-b265-69a3d8a6d177",
+      "name": "Sticky Note - Handoff",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        880,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### Rejected path\nInvalid alarms are NOT dropped silently.\n\nIn Milestone 13 (central-error-handler / audit-logger) this NoOp will be replaced with a persistent log write so rejected alarms are still traceable.",
+        "width": 260
+      },
+      "id": "0a24469f-5102-42b5-a1e8-e80568a7bf59",
+      "name": "Sticky Note - Rejected Path",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        880,
+        592
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "cachedResultName": "WF-02 - Alarm Normalizer",
+          "mode": "id",
+          "value": "lpJzpskuA7RO06vm"
+        },
+        "workflowInputs": {
+          "mappingMode": "autoMapInputData",
+          "value": null
+        },
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "e37cddef-e936-4a2c-8fc7-fb1468c0a69d",
+      "name": "6. Execute WF-02 Normalizer",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        1136,
+        144
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "1. Alarm Ingestion Webhook": {
+      "main": [
+        [
+          {
+            "node": "2. Extract & Validate Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "2. Extract & Validate Payload": {
+      "main": [
+        [
+          {
+            "node": "3. Is Payload Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "3. Is Payload Valid?": {
+      "main": [
+        [
+          {
+            "node": "4a. Build Standard Alarm Envelope",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "4b. Mark Alarm Rejected",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "4a. Build Standard Alarm Envelope": {
+      "main": [
+        [
+          {
+            "node": "5a. Ready for WF-02 Normalizer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "4b. Mark Alarm Rejected": {
+      "main": [
+        [
+          {
+            "node": "5b. Rejected - Awaiting Audit Logger (Milestone 13)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "5a. Ready for WF-02 Normalizer": {
+      "main": [
+        [
+          {
+            "node": "6. Execute WF-02 Normalizer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": true
+  },
+  "versionId": "f7fb106e-9591-4ade-a0cd-162ada4d112e",
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp",
+    "templateCredsSetupCompleted": true,
+    "instanceId": "05947142a4f38e4077604ad3dd31b1a8ac91444cd1d3240f77e7b6d160094eee"
+  },
+  "nodeGroups": [],
+  "id": "y31iGY3hrG7LjdMI",
+  "tags": []
+}

@@ -1,0 +1,521 @@
+{
+  "name": "WF-04 - Site Metadata Enrichment",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## WF-04: Site Metadata Enrichment\n\nStandalone, reusable sub-workflow. Called by WF-03 (AI Classification Engine) via an 'Execute Workflow' node, passing its validated AI output.\n\nFlow:\nExecute Workflow Trigger -> Validate Input -> Lookup Site (Google Sheets) -> Merge Metadata -> [Is Site Found?] -> Calculate Customer Impact -> Calculate Business Priority -> Return Enriched Alarm\n\nMissing input, failed lookups, and unknown sites each route to their own Error Output.\n\nNo Telegram, no Slack, no Email, no dashboard, no ticketing - enrichment only.",
+        "height": 260,
+        "width": 380
+      },
+      "id": "496d4f48-0039-4d4e-89ea-53e9a0c0f826",
+      "name": "Sticky Note - Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "id": "f4f6e181-36b3-4be4-a0bb-cc148be895d6",
+      "name": "1. Execute Workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        32,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 2. Validate Input\n// Confirms the alarm from WF-03 has what this workflow needs, above all a\n// siteId to look up in the site metadata sheet.\n\nconst REQUIRED = ['correlationId', 'siteId', 'alarmType', 'priority'];\n\nconst item = $input.first().json;\nconst missing = REQUIRED.filter((f) => item[f] === undefined || item[f] === null || item[f] === '');\n\nreturn [{\n  json: {\n    isValid: missing.length === 0,\n    missingFields: missing,\n    ...item\n  }\n}];"
+      },
+      "id": "760eb6d6-1e69-4606-83b3-ce04975615f3",
+      "name": "2. Validate Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond-input-valid",
+              "leftValue": "={{$json.isValid}}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a030c8d0-b42a-4bda-b764-d327c14fa8fb",
+      "name": "Is Input Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        464,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "ei1",
+              "name": "status",
+              "type": "string",
+              "value": "invalid_input"
+            },
+            {
+              "id": "ei2",
+              "name": "correlationId",
+              "type": "string",
+              "value": "={{$json.correlationId}}"
+            },
+            {
+              "id": "ei3",
+              "name": "missingFields",
+              "type": "array",
+              "value": "={{$json.missingFields}}"
+            },
+            {
+              "id": "ei4",
+              "name": "receivedAt",
+              "type": "string",
+              "value": "={{$now.toISO()}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "791295d8-2710-4ffa-bbbe-b0bd3d7bd7c7",
+      "name": "Error Output - Invalid Input",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        688,
+        608
+      ]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1oybju6yDVOL6LpkDAmBsM8iG9uUQeJPQ8XRsw3VadNQ",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "SiteMetadata"
+        },
+        "filtersUI": {
+          "values": [
+            {
+              "lookupColumn": "Site ID",
+              "lookupValue": "={{$json.siteId}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "21dd8762-1ffc-46ce-9742-00b56358c9df",
+      "name": "3. Lookup Site",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        688,
+        240
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "alwaysOutputData": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "H7TRzfxIzawI7UIO",
+          "name": "Google Sheets account"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "el1",
+              "name": "status",
+              "type": "string",
+              "value": "lookup_failed"
+            },
+            {
+              "id": "el2",
+              "name": "correlationId",
+              "type": "string",
+              "value": "={{ $('2. Validate Input').first().json.correlationId }}"
+            },
+            {
+              "id": "el3",
+              "name": "siteId",
+              "type": "string",
+              "value": "={{ $('2. Validate Input').first().json.siteId }}"
+            },
+            {
+              "id": "el4",
+              "name": "errorMessage",
+              "type": "string",
+              "value": "={{$json.error ? $json.error.toString() : 'Unknown error reading the Site Metadata sheet'}}"
+            },
+            {
+              "id": "el5",
+              "name": "receivedAt",
+              "type": "string",
+              "value": "={{$now.toISO()}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "8ee16eaf-346c-4c34-bda4-038295ddd48a",
+      "name": "Error Output - Lookup Failed",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        912,
+        64
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 4. Merge Metadata\n// Combines the alarm + AI classification (from WF-03) with the site\n// metadata row(s) returned by the Google Sheets lookup (0 rows = not found,\n// since Site ID is expected to be unique).\n//\n// '3. Lookup Site' has alwaysOutputData enabled so a not-found case still\n// reaches this node (otherwise n8n skips downstream nodes entirely on 0\n// items, making the Is Site Found? / Error Output - Site Not Found path\n// unreachable). That means a genuine not-found case arrives here as a\n// single synthetic empty item ({}), not zero items -- so isSiteFound is\n// based on whether that row actually has data, not on item count alone.\n\nconst rows = $input.all();\nconst alarm = $('2. Validate Input').first().json;\nconst firstRow = rows.length > 0 ? rows[0].json : {};\nconst isSiteFound = rows.length > 0 && Object.keys(firstRow).length > 0;\nconst site = isSiteFound ? firstRow : {};\n\nreturn [{\n  json: {\n    // Alarm + AI classification fields, passed through from WF-03\n    correlationId: alarm.correlationId,\n    vendor: alarm.vendor,\n    alarmType: alarm.alarmType,\n    originalSeverity: alarm.originalSeverity,\n    nodeName: alarm.nodeName,\n    siteId: alarm.siteId,\n    region: alarm.region,\n    timestamp: alarm.timestamp,\n    alarmCategory: alarm.alarmCategory,\n    rootCause: alarm.rootCause,\n    impact: alarm.impact,\n    priority: alarm.priority,\n    recommendedAction: alarm.recommendedAction,\n    estimatedResolution: alarm.estimatedResolution,\n    confidence: alarm.confidence,\n    fieldEngineer: alarm.fieldEngineer,\n    aiCustomerImpact: alarm.customerImpact,\n    team: alarm.team,\n    prevention: alarm.prevention,\n    reviewStatus: alarm.reviewStatus,\n\n    // Site metadata fields, from the Google Sheets lookup\n    isSiteFound,\n    siteName: site['Site Name'] || null,\n    division: site['Division'] || null,\n    district: site['District'] || null,\n    latitude: site['Latitude'] || null,\n    longitude: site['Longitude'] || null,\n    nodeType: site['Node Type'] || null,\n    customerCount: Number(site['Customer Count']) || 0,\n    slaTier: site['SLA Tier'] || 'Silver',\n    siteOwner: site['Site Owner'] || null,\n    transmissionRegion: site['Transmission Region'] || null,\n    engineerName: site['Engineer Name'] || null,\n    engineerPhone: site['Engineer Phone'] || null,\n    backupEngineer: site['Backup Engineer'] || null,\n    nearestPOP: site['Nearest POP'] || null,\n    fiberRoute: site['Fiber Route'] || null\n  }\n}];"
+      },
+      "id": "d143ca24-09fe-41a7-bd69-d75dd5bff62e",
+      "name": "4. Merge Metadata",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        912,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond-site-found",
+              "leftValue": "={{$json.isSiteFound}}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "3594c1de-fdbe-49b3-99c6-24ae2588d6ea",
+      "name": "Is Site Found?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "es1",
+              "name": "status",
+              "type": "string",
+              "value": "site_not_found"
+            },
+            {
+              "id": "es2",
+              "name": "correlationId",
+              "type": "string",
+              "value": "={{$json.correlationId}}"
+            },
+            {
+              "id": "es3",
+              "name": "siteId",
+              "type": "string",
+              "value": "={{$json.siteId}}"
+            },
+            {
+              "id": "es4",
+              "name": "message",
+              "type": "string",
+              "value": "=No matching row found in the Site Metadata sheet for Site ID '{{$json.siteId}}'. Alarm was classified by AI but could not be enriched or scored for customer impact/business priority."
+            },
+            {
+              "id": "es5",
+              "name": "receivedAt",
+              "type": "string",
+              "value": "={{$now.toISO()}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "b6f04fbf-a9fa-49a7-bc60-92fbe2598891",
+      "name": "Error Output - Site Not Found",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1120,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 5. Calculate Customer Impact\n// Blends the site's actual customer count + SLA tier with the AI's own\n// customerImpact judgment from WF-03, and takes the MORE severe of the two\n// so metadata never quietly downgrades what the AI flagged.\n\nconst item = $input.first().json;\n\nconst IMPACT_RANK = { Low: 1, Medium: 2, High: 3 };\nconst RANK_TO_IMPACT = { 1: 'Low', 2: 'Medium', 3: 'High' };\n\nfunction baseImpactFromCount(count) {\n  if (count > 1000) return 'High';\n  if (count >= 200) return 'Medium';\n  return 'Low';\n}\n\nlet computedImpact = baseImpactFromCount(item.customerCount);\n\n// SLA tier modifier: Gold nudges impact up a level, Bronze nudges it down a level\nif (item.slaTier === 'Gold' && IMPACT_RANK[computedImpact] < 3) {\n  computedImpact = RANK_TO_IMPACT[IMPACT_RANK[computedImpact] + 1];\n}\nif (item.slaTier === 'Bronze' && IMPACT_RANK[computedImpact] > 1) {\n  computedImpact = RANK_TO_IMPACT[IMPACT_RANK[computedImpact] - 1];\n}\n\nconst aiImpact = item.aiCustomerImpact || 'Low';\nconst finalImpact = IMPACT_RANK[aiImpact] >= IMPACT_RANK[computedImpact] ? aiImpact : computedImpact;\n\nreturn [{\n  json: {\n    ...item,\n    computedCustomerImpact: computedImpact,\n    customerImpact: finalImpact,\n    customerImpactScore: IMPACT_RANK[finalImpact]\n  }\n}];"
+      },
+      "id": "1380d7e7-73c9-427f-8b92-5c98cb67b3e1",
+      "name": "5. Calculate Customer Impact",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1344,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 6. Calculate Business Priority\n// Combines AI priority + final customer impact + SLA tier into one\n// weighted business priority (P1-P4) that operations can queue/dispatch on.\n\nconst item = $input.first().json;\n\nconst PRIORITY_WEIGHT = { Critical: 4, Major: 3, Minor: 2, Warning: 1 };\nconst IMPACT_WEIGHT = { High: 3, Medium: 2, Low: 1 };\nconst SLA_WEIGHT = { Gold: 2, Silver: 1, Bronze: 0 };\n\nconst priorityWeight = PRIORITY_WEIGHT[item.priority] || 1;\nconst impactWeight = IMPACT_WEIGHT[item.customerImpact] || 1;\nconst slaWeight = SLA_WEIGHT[item.slaTier] !== undefined ? SLA_WEIGHT[item.slaTier] : 1;\n\nconst score = priorityWeight + impactWeight + slaWeight;\n\nlet businessPriority;\nif (score >= 8) businessPriority = 'P1 - Urgent';\nelse if (score >= 6) businessPriority = 'P2 - High';\nelse if (score >= 4) businessPriority = 'P3 - Normal';\nelse businessPriority = 'P4 - Low';\n\nreturn [{\n  json: {\n    ...item,\n    businessPriorityScore: score,\n    businessPriority,\n    enrichedAt: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "9ced5677-0e36-4a35-8b34-172bef778041",
+      "name": "6. Calculate Business Priority",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1568,
+        240
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "088157fe-438c-4891-8a36-5d93997468c0",
+      "name": "7. Return Enriched Alarm",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1792,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### Error handling summary\n- Missing required fields from WF-03 -> Error Output - Invalid Input\n- Google Sheets read fails/times out (after 3 retries, 2s apart) -> Error Output - Lookup Failed\n- Site ID has no matching row in the sheet -> Error Output - Site Not Found (alarm's AI classification is preserved in the message for follow-up)\n\nEvery path returns a structured JSON object. Nothing is ever dropped silently.",
+        "height": 200,
+        "width": 320
+      },
+      "id": "bffef3b1-d46f-4dcf-9eb5-701f0e87ff14",
+      "name": "Sticky Note - Error Handling",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        912,
+        608
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "cachedResultName": "WF-05 - Alarm Correlation & Deduplication Engine",
+          "mode": "id",
+          "value": "PHTsuwVrf4KR5wLd"
+        },
+        "workflowInputs": {
+          "mappingMode": "autoMapInputData",
+          "value": null
+        },
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "8f7d6539-54ac-43d0-9e10-2d522a88b220",
+      "name": "8. Execute WF-05 Correlation",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        2016,
+        240
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "1. Execute Workflow Trigger": {
+      "main": [
+        [
+          {
+            "node": "2. Validate Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "2. Validate Input": {
+      "main": [
+        [
+          {
+            "node": "Is Input Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Input Valid?": {
+      "main": [
+        [
+          {
+            "node": "3. Lookup Site",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Error Output - Invalid Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "3. Lookup Site": {
+      "main": [
+        [
+          {
+            "node": "4. Merge Metadata",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Error Output - Lookup Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "4. Merge Metadata": {
+      "main": [
+        [
+          {
+            "node": "Is Site Found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Site Found?": {
+      "main": [
+        [
+          {
+            "node": "5. Calculate Customer Impact",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Error Output - Site Not Found",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "5. Calculate Customer Impact": {
+      "main": [
+        [
+          {
+            "node": "6. Calculate Business Priority",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "6. Calculate Business Priority": {
+      "main": [
+        [
+          {
+            "node": "7. Return Enriched Alarm",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "7. Return Enriched Alarm": {
+      "main": [
+        [
+          {
+            "node": "8. Execute WF-05 Correlation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": true
+  },
+  "versionId": "768ace2f-476d-4f4c-9c5d-b1ba52529d11",
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp",
+    "templateCredsSetupCompleted": true,
+    "instanceId": "05947142a4f38e4077604ad3dd31b1a8ac91444cd1d3240f77e7b6d160094eee"
+  },
+  "nodeGroups": [],
+  "id": "E51WXHZ6qEUC1f56",
+  "tags": []
+}

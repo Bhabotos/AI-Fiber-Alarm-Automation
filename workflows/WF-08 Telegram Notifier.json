@@ -1,0 +1,471 @@
+{
+  "name": "WF-08 Telegram Notifier",
+  "nodes": [
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "id": "0bf497d3-d8ee-4aa7-bbe7-c15bae550c7f",
+      "name": "1. Execute Workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        240,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 2. Validate Input\n// Confirms the notification payload handed off by WF-07 has what this\n// workflow needs to resolve a chat and send a Telegram message.\n\nconst item = $input.first().json;\n\nconst incidentId = item.incidentId;\nconst destination = item.destination || {};\nconst chatIdKey = destination.chatId;\nconst assignedTeam = destination.team;\nconst priority = item.priority;\n\nconst missing = [];\nif (!incidentId) missing.push('incidentId');\nif (!chatIdKey) missing.push('destination.chatId');\nif (!assignedTeam) missing.push('destination.team');\nif (!priority) missing.push('priority');\n\nreturn [{\n  json: {\n    isValid: missing.length === 0,\n    missingFields: missing,\n    ...item\n  }\n}];"
+      },
+      "id": "e6838081-f61f-4632-862b-4be7b98fe231",
+      "name": "2. Validate Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        464,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond-input-valid",
+              "leftValue": "={{$json.isValid}}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "56052fa8-4bb7-41b3-8906-5c8368d9f5b4",
+      "name": "Is Input Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        688,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 3. Resolve Telegram Chat ID\n// WF-07 already decided WHICH team a notification belongs to and handed\n// off a placeholder chat-id key (e.g. TELEGRAM_CHAT_TRANSMISSION_TEAM).\n// This node turns that key into the REAL Telegram chat ID using the\n// table below -- the same inline-mapping pattern WF-07 already uses for\n// its own team -> key lookup, chosen because this n8n instance blocks\n// $env access from Code nodes.\n//\n// REPLACE each value below with your real Telegram chat/group ID --\n// see the Telegram Setup Guide. Unmapped or not-yet-configured keys\n// fall back to the NOC chat rather than being undeliverable.\n\nconst item = $input.first().json;\n\nconst destination = item.destination || {};\nconst chatIdKey = destination.chatId;\n\nconst CHAT_ID_TABLE = {\n  'TELEGRAM_CHAT_TRANSMISSION_TEAM': '1239214407',\n  'TELEGRAM_CHAT_POWER_TEAM': '1239214407',\n  'TELEGRAM_CHAT_ACCESS_NETWORK_TEAM': '1239214407',\n  'TELEGRAM_CHAT_IP_NETWORK_TEAM': '1239214407',\n  'TELEGRAM_CHAT_IP_CORE_TEAM': '1239214407',\n  'TELEGRAM_CHAT_TRANSMISSION_MONITORING': '1239214407',\n  'TELEGRAM_CHAT_SITE_MAINTENANCE_TEAM': '1239214407',\n  'TELEGRAM_CHAT_NOC': '1239214407'\n};\n\nconst directValue = chatIdKey ? CHAT_ID_TABLE[chatIdKey] : undefined;\nconst fallbackValue = CHAT_ID_TABLE['TELEGRAM_CHAT_NOC'];\nconst resolvedChatId = directValue || fallbackValue || null;\nconst chatIdFallbackUsed = !directValue;\n\nreturn [{\n  json: {\n    ...item,\n    chatIdKey,\n    resolvedChatId,\n    chatIdFallbackUsed\n  }\n}];"
+      },
+      "id": "ef7844ab-bad1-47d5-a113-4a07f8a84aca",
+      "name": "3. Resolve Telegram Chat ID",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        912,
+        208
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 500
+    },
+    {
+      "parameters": {
+        "jsCode": "// 4. Format Telegram Message\n// Builds the Telegram message text. The header emoji/label is derived\n// from priority (and boosted for immediateEscalation) rather than\n// hardcoded to 'Critical', since this workflow handles every priority\n// level, not just Critical incidents. Fields not yet passed through the\n// pipeline (alarmType, region, customerImpact, aiRecommendation) default\n// gracefully -- see README 'Note on incomplete field passthrough from\n// WF-07'.\n\nconst item = $input.first().json;\n\nconst PRIORITY_EMOJI = { Critical: '\\uD83D\\uDEA8', Major: '\\u26A0\\uFE0F', Minor: '\\uD83D\\uDD37', Warning: '\\u2139\\uFE0F' };\nconst emoji = PRIORITY_EMOJI[item.priority] || '\\uD83D\\uDD14';\nconst headerPrefix = item.immediateEscalation === true ? (emoji + ' IMMEDIATE ESCALATION - ') : (emoji + ' ');\nconst header = headerPrefix + (item.priority || 'Unknown') + ' Fiber Alarm';\n\nconst incidentId = item.incidentId || 'Unknown';\nconst site = item.siteId || item.site || 'Not specified';\nconst region = item.region || 'Not specified';\nconst alarmType = item.alarmType || item.rawAlarmType || 'Not specified';\nconst priority = item.priority || 'Not specified';\nconst assignedTeam = (item.destination && item.destination.team) || 'Not specified';\nconst sla = item.slaDeadline ? ('By ' + item.slaDeadline) : 'Not set';\nconst businessImpact = item.businessImpact || 'Not available';\nconst customerImpact = item.customerImpact || (typeof item.affectedCustomers === 'number' ? (item.affectedCustomers + ' customer(s) affected') : 'Not available');\nconst aiRecommendation = item.aiRecommendation || 'Not available';\nconst time = item.preparedAt || new Date().toISOString();\n\nconst messageText =\n  header + '\\n\\n' +\n  'Incident ID: ' + incidentId + '\\n' +\n  'Site: ' + site + '\\n' +\n  'Region: ' + region + '\\n' +\n  'Alarm: ' + alarmType + '\\n' +\n  'Priority: ' + priority + '\\n' +\n  'Assigned Team: ' + assignedTeam + '\\n' +\n  'SLA: ' + sla + '\\n' +\n  'Business Impact: ' + businessImpact + '\\n' +\n  'Customer Impact: ' + customerImpact + '\\n' +\n  'AI Recommendation: ' + aiRecommendation + '\\n' +\n  'Time: ' + time;\n\nreturn [{\n  json: {\n    ...item,\n    messageText\n  }\n}];"
+      },
+      "id": "accea585-b40f-4786-aa19-726254658731",
+      "name": "4. Format Telegram Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        208
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 500
+    },
+    {
+      "parameters": {
+        "chatId": "={{$json.resolvedChatId}}",
+        "text": "={{$json.messageText}}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "disable_notification": false
+        }
+      },
+      "id": "c4f044a9-2764-4821-8910-b7604731c9c7",
+      "name": "5. Send Telegram Notification",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1344,
+        208
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000,
+      "webhookId": "a1208300-b116-4524-8b19-0d09ca792ea3",
+      "credentials": {
+        "telegramApi": {
+          "id": "fCz8OelL3PrISRvJ",
+          "name": "Telegram account"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "ds1",
+              "name": "status",
+              "type": "string",
+              "value": "sent"
+            },
+            {
+              "id": "ds2",
+              "name": "incidentId",
+              "type": "string",
+              "value": "={{$('4. Format Telegram Message').item.json.incidentId}}"
+            },
+            {
+              "id": "ds3",
+              "name": "chatId",
+              "type": "string",
+              "value": "={{$('4. Format Telegram Message').item.json.resolvedChatId}}"
+            },
+            {
+              "id": "ds4",
+              "name": "assignedTeam",
+              "type": "string",
+              "value": "={{$('4. Format Telegram Message').item.json.destination.team}}"
+            },
+            {
+              "id": "ds5",
+              "name": "telegramMessageId",
+              "type": "number",
+              "value": "={{$json.result && $json.result.message_id ? $json.result.message_id : null}}"
+            },
+            {
+              "id": "ds6",
+              "name": "sentAt",
+              "type": "string",
+              "value": "={{$now.toISO()}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "c8332307-1bc9-4ba0-af2e-4b19a33befb6",
+      "name": "6. Return Dispatch Result",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1568,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 7. Build Failure Record\n// Runs on the Telegram send node's error output (after all 3 retry\n// attempts have been exhausted). Assembles a structured failure record\n// combining the original message context with the Telegram API's error.\n// n8n's Telegram node puts the error directly on item.error as a STRING\n// (e.g. 'Bad Request: chat not found'), not an { message } object -- this\n// handles both shapes defensively.\n\nconst item = $input.first().json;\nconst source = $('4. Format Telegram Message').item.json;\n\nlet errorMessage = 'Unknown Telegram delivery error';\nif (typeof item.error === 'string' && item.error) {\n  errorMessage = item.error;\n} else if (item.error && item.error.message) {\n  errorMessage = item.error.message;\n} else if (item.message) {\n  errorMessage = item.message;\n}\n\nreturn [{\n  json: {\n    status: 'failed',\n    incidentId: source.incidentId,\n    chatId: source.resolvedChatId,\n    assignedTeam: (source.destination && source.destination.team) || null,\n    errorMessage,\n    attemptsMade: 3,\n    failedAt: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "8e76fc3e-1021-46d9-8843-e964e7b883f8",
+      "name": "7. Build Failure Record",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1568,
+        384
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "7bc330fb-0560-4146-9441-7e09890110a2",
+      "name": "8. Log Failure",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1792,
+        384
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "df1",
+              "name": "status",
+              "type": "string",
+              "value": "failed"
+            },
+            {
+              "id": "df2",
+              "name": "incidentId",
+              "type": "string",
+              "value": "={{$json.incidentId}}"
+            },
+            {
+              "id": "df3",
+              "name": "chatId",
+              "type": "string",
+              "value": "={{$json.chatId}}"
+            },
+            {
+              "id": "df4",
+              "name": "assignedTeam",
+              "type": "string",
+              "value": "={{$json.assignedTeam}}"
+            },
+            {
+              "id": "df5",
+              "name": "errorMessage",
+              "type": "string",
+              "value": "={{$json.errorMessage}}"
+            },
+            {
+              "id": "df6",
+              "name": "attemptsMade",
+              "type": "number",
+              "value": "={{$json.attemptsMade}}"
+            },
+            {
+              "id": "df7",
+              "name": "failedAt",
+              "type": "string",
+              "value": "={{$json.failedAt}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "8cf73c84-182d-4c5d-ad11-1acf580b11fa",
+      "name": "Error Output - Delivery Failed",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2000,
+        384
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "ei1",
+              "name": "status",
+              "type": "string",
+              "value": "invalid_input"
+            },
+            {
+              "id": "ei2",
+              "name": "incidentId",
+              "type": "string",
+              "value": "={{$json.incidentId}}"
+            },
+            {
+              "id": "ei3",
+              "name": "missingFields",
+              "type": "array",
+              "value": "={{$json.missingFields}}"
+            },
+            {
+              "id": "ei4",
+              "name": "receivedAt",
+              "type": "string",
+              "value": "={{$now.toISO()}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "83a0c32d-a598-40fc-b58d-a76139fe015c",
+      "name": "Error Output - Invalid Input",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        912,
+        464
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## WF-08 - Telegram Notifier\n\nMilestone 9. Standalone, reusable sub-workflow following the same pattern as WF-02 through WF-07. Called by WF-07 via an Execute Workflow node. Takes one prepared notification payload, resolves the real Telegram chat ID, formats the message, and actually sends it via the Telegram Bot API -- the delivery step WF-07 intentionally left out.",
+        "height": 200,
+        "width": 520,
+        "color": 4
+      },
+      "id": "5228606d-1272-44c3-8ec9-e81f6088b0f2",
+      "name": "Sticky Note 115a8c96",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        192,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Chat ID Resolution\n\ndestination.chatId from WF-07 is a placeholder KEY (e.g. TELEGRAM_CHAT_TRANSMISSION_TEAM), not a real chat ID. This node maps that key to a real Telegram chat/group ID via an inline table (this n8n instance blocks $env access from Code nodes, so environment variables were not an option). Open this node and replace each REPLACE_WITH_REAL_CHAT_ID value -- see the Telegram Setup Guide. Unmapped/unconfigured keys fall back to the NOC chat.",
+        "height": 200,
+        "width": 300,
+        "color": 5
+      },
+      "id": "cde131f1-e5d5-4d29-a13f-625a0ab739bc",
+      "name": "Sticky Note 1c4aded6",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        880,
+        -16
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Retry & Error Handling\n\n5. Send Telegram Notification retries 3 times (1s apart) before routing to its error output. On failure: Build Failure Record -> Log Failure -> Error Output - Delivery Failed (the structured error this workflow returns). On success: Return Dispatch Result, including the Telegram message_id.",
+        "height": 480,
+        "width": 960,
+        "color": 3
+      },
+      "id": "6541e8e2-d9b0-4d58-a537-121a206ebbf0",
+      "name": "Sticky Note 1ccfaeb8",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1344,
+        -48
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "1. Execute Workflow Trigger": {
+      "main": [
+        [
+          {
+            "node": "2. Validate Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "2. Validate Input": {
+      "main": [
+        [
+          {
+            "node": "Is Input Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Input Valid?": {
+      "main": [
+        [
+          {
+            "node": "3. Resolve Telegram Chat ID",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Error Output - Invalid Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "3. Resolve Telegram Chat ID": {
+      "main": [
+        [
+          {
+            "node": "4. Format Telegram Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "4. Format Telegram Message": {
+      "main": [
+        [
+          {
+            "node": "5. Send Telegram Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "5. Send Telegram Notification": {
+      "main": [
+        [
+          {
+            "node": "6. Return Dispatch Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "7. Build Failure Record",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "7. Build Failure Record": {
+      "main": [
+        [
+          {
+            "node": "8. Log Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "8. Log Failure": {
+      "main": [
+        [
+          {
+            "node": "Error Output - Delivery Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": true
+  },
+  "versionId": "7da4b721-ac60-408c-ab1a-223cc3dc3a69",
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp",
+    "instanceId": "05947142a4f38e4077604ad3dd31b1a8ac91444cd1d3240f77e7b6d160094eee"
+  },
+  "nodeGroups": [],
+  "id": "SgKj749jIq3b0Q6D",
+  "tags": []
+}
